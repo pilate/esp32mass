@@ -41,6 +41,18 @@ esp_err_t web_send_json(httpd_req_t *req, cJSON *obj)
     return e;
 }
 
+cJSON *web_json_ok(void)
+{
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddBoolToObject(o, "ok", true);
+    return o;
+}
+
+esp_err_t web_send_ok(httpd_req_t *req)
+{
+    return web_send_json(req, web_json_ok());
+}
+
 esp_err_t web_send_error(httpd_req_t *req, const char *status, const char *msg)
 {
     cJSON *o = cJSON_CreateObject();
@@ -227,8 +239,7 @@ static esp_err_t wifi_post(httpd_req_t *req)
     if (err != ESP_OK) {
         return web_send_error(req, "400 Bad Request", "ssid missing or too long (max 32), password max 63");
     }
-    cJSON *o = cJSON_CreateObject();
-    cJSON_AddBoolToObject(o, "ok", true);
+    cJSON *o = web_json_ok();
     cJSON_AddStringToObject(o, "message", "connecting; watch the status panel for the new IP");
     return web_send_json(req, o);
 }
@@ -236,9 +247,7 @@ static esp_err_t wifi_post(httpd_req_t *req)
 static esp_err_t wifi_forget_post(httpd_req_t *req)
 {
     wifi_mgr_forget();
-    cJSON *o = cJSON_CreateObject();
-    cJSON_AddBoolToObject(o, "ok", true);
-    return web_send_json(req, o);
+    return web_send_ok(req);
 }
 
 static esp_err_t settings_post(httpd_req_t *req)
@@ -283,9 +292,7 @@ static esp_err_t settings_post(httpd_req_t *req)
         vTaskDelay(pdMS_TO_TICKS(500));
         usb_msc_set_attached(true);
     }
-    cJSON *o = cJSON_CreateObject();
-    cJSON_AddBoolToObject(o, "ok", true);
-    return web_send_json(req, o);
+    return web_send_ok(req);
 }
 
 static esp_err_t usb_post(httpd_req_t *req)
@@ -324,9 +331,7 @@ static esp_err_t usb_post(httpd_req_t *req)
     if (res != ESP_OK) {
         return web_send_error(req, "409 Conflict", msg);
     }
-    cJSON *o = cJSON_CreateObject();
-    cJSON_AddBoolToObject(o, "ok", true);
-    return web_send_json(req, o);
+    return web_send_ok(req);
 }
 
 static esp_err_t download_get(httpd_req_t *req)
@@ -442,9 +447,7 @@ static esp_err_t wipe_post(httpd_req_t *req)
         return web_send_error(req, "500 Internal Server Error", "write failed");
     }
     ESP_LOGW(TAG, "card wiped (first 2 MB and last 1 MB)");
-    cJSON *o = cJSON_CreateObject();
-    cJSON_AddBoolToObject(o, "ok", true);
-    return web_send_json(req, o);
+    return web_send_ok(req);
 }
 
 static esp_err_t log_get(httpd_req_t *req)
@@ -525,8 +528,7 @@ static esp_err_t ota_post(httpd_req_t *req)
     }
     ESP_LOGW(TAG, "firmware updated into %s, rebooting", part->label);
     schedule_reboot(1000);
-    cJSON *o = cJSON_CreateObject();
-    cJSON_AddBoolToObject(o, "ok", true);
+    cJSON *o = web_json_ok();
     cJSON_AddStringToObject(o, "message", "firmware written, rebooting");
     return web_send_json(req, o);
 }
@@ -534,9 +536,7 @@ static esp_err_t ota_post(httpd_req_t *req)
 static esp_err_t reboot_post(httpd_req_t *req)
 {
     schedule_reboot(500);
-    cJSON *o = cJSON_CreateObject();
-    cJSON_AddBoolToObject(o, "ok", true);
-    return web_send_json(req, o);
+    return web_send_ok(req);
 }
 
 // State-changing requests must carry this header. A browser only sends a custom

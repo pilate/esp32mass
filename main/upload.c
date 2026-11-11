@@ -305,8 +305,7 @@ esp_err_t upload_begin_handler(httpd_req_t *req)
     xSemaphoreGive(s_lock);
 
     ESP_LOGI(TAG, "begin '%s', %llu bytes", name, (unsigned long long)size);
-    cJSON *o = cJSON_CreateObject();
-    cJSON_AddBoolToObject(o, "ok", true);
+    cJSON *o = web_json_ok();
     cJSON_AddNumberToObject(o, "chunk_size", UP_CHUNK_HINT);
     cJSON_AddNumberToObject(o, "buffer", (double)s_buf_bytes);
     return web_send_json(req, o);
@@ -388,8 +387,7 @@ esp_err_t upload_chunk_handler(httpd_req_t *req)
     uint64_t received = s_up.dispatched + s_up.cur_fill;
     xSemaphoreGive(s_lock);
 
-    cJSON *o = cJSON_CreateObject();
-    cJSON_AddBoolToObject(o, "ok", true);
+    cJSON *o = web_json_ok();
     cJSON_AddNumberToObject(o, "received", (double)received);
     return web_send_json(req, o);
 }
@@ -526,8 +524,7 @@ esp_err_t upload_finish_handler(httpd_req_t *req)
     end_upload(true);
     xSemaphoreGive(s_lock);
 
-    cJSON *o = cJSON_CreateObject();
-    cJSON_AddBoolToObject(o, "ok", true);
+    cJSON *o = web_json_ok();
     cJSON_AddStringToObject(o, "sha256", meta.sha256);
     cJSON_AddBoolToObject(o, "verified", verified);
     return web_send_json(req, o);
@@ -542,7 +539,5 @@ esp_err_t upload_abort_handler(httpd_req_t *req)
         end_upload(true);
     }
     xSemaphoreGive(s_lock);
-    cJSON *o = cJSON_CreateObject();
-    cJSON_AddBoolToObject(o, "ok", true);
-    return web_send_json(req, o);
+    return web_send_ok(req);
 }
