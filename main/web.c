@@ -94,6 +94,29 @@ static void schedule_reboot(uint32_t ms)
     esp_timer_start_once(s_reboot_timer, (uint64_t)ms * 1000);
 }
 
+// After an OTA update the bootloader starts the new app in PENDING_VERIFY state and
+// rolls back to the previous one if the device resets before the app is confirmed.
+// Confirm only once the web UI has actually been reached over the network, so an
+// update that boots but breaks Wi-Fi or the web server is undone by a power cycle.
+static void confirm_running_app(void)
+{
+    static bool s_confirmed;
+    if (s_confirmed) {
+        return;
+    }
+    s_confirmed = true;
+    esp_ota_img_states_t state;
+    if (esp_ota_get_state_partition(esp_ota_get_running_partition(), &state) == ESP_OK &&
+        state == ESP_OTA_IMG_PENDING_VERIFY) {
+        esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "new firmware confirmed, rollback cancelled");
+        } else {
+            ESP_LOGE(TAG, "confirming firmware failed: %s", esp_err_to_name(err));
+        }
+    }
+}
+
 // ---- handlers ---------------------------------------------------------------
 
 static esp_err_t root_get(httpd_req_t *req)
@@ -105,6 +128,7 @@ static esp_err_t root_get(httpd_req_t *req)
 
 static esp_err_t status_get(httpd_req_t *req)
 {
+    confirm_running_app();
     cJSON *o = cJSON_CreateObject();
     cJSON_AddStringToObject(o, "version", esp_app_get_description()->version);
     cJSON_AddNumberToObject(o, "uptime_s", (double)(esp_timer_get_time() / 1000000));
@@ -419,6 +443,7 @@ static esp_err_t ota_post(httpd_req_t *req)
     if (upload_active()) {
         return web_send_error(req, "409 Conflict", "upload in progress");
     }
+    confirm_running_app();   // esp_ota_begin() refuses while the running app is unconfirmed
     const esp_partition_t *part = esp_ota_get_next_update_partition(NULL);
     if (!part) {
         return web_send_error(req, "500 Internal Server Error", "no OTA partition");
@@ -438,10 +463,11 @@ static esp_err_t ota_post(httpd_req_t *req)
     }
     size_t remaining = req->content_len;
     bool first = true;
+    int timeouts = 0;
     while (remaining > 0) {
         int r = httpd_req_recv(req, buf, remaining < 4096 ? remaining : 4096);
-        if (r == HTTPD_SOCK_ERR_TIMEOUT) {
-            continue;
+        if (r == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts < 5) {
+            continue;   // a stalled client gets ~100 s, then the server is freed again
         }
         if (r <= 0) {
             err = ESP_FAIL;
@@ -458,6 +484,7 @@ static esp_err_t ota_post(httpd_req_t *req)
         if (err != ESP_OK) {
             break;
         }
+        timeouts = 0;
         remaining -= r;
     }
     free(buf);
