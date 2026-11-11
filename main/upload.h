@@ -4,8 +4,17 @@
 #include "esp_http_server.h"
 #include "cJSON.h"
 
+typedef struct {
+    bool active;
+    bool verifying;
+    uint64_t size;          // declared image size in bytes
+    uint64_t received;      // bytes accepted so far
+    double rate_bps;        // average receive rate, 0 when idle or just started
+} upload_progress_t;
+
 esp_err_t upload_init(void);
 bool upload_active(void);
+void upload_get_progress(upload_progress_t *out);
 void upload_check_stale(void);             // call about once a second
 void upload_status_json(cJSON *obj);       // fills an object with upload state
 

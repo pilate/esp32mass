@@ -105,17 +105,13 @@ static void update_display(void)
         format_size(sdcard_capacity_bytes(), sz, sizeof(sz));
         snprintf(l[5], sizeof(l[5]), "SD: %s %s", sz, settings_get()->read_only ? "RO" : "RW");
     }
-    if (upload_active()) {
-        cJSON *tmp = cJSON_CreateObject();
-        upload_status_json(tmp);
-        double size = cJSON_GetObjectItem(tmp, "size")->valuedouble;
-        double recv = cJSON_GetObjectItem(tmp, "received")->valuedouble;
-        bool verifying = cJSON_IsTrue(cJSON_GetObjectItem(tmp, "verifying"));
-        double rate = cJSON_GetObjectItem(tmp, "rate_bps")->valuedouble;
-        cJSON_Delete(tmp);
+    upload_progress_t up;
+    upload_get_progress(&up);
+    if (up.active) {
         snprintf(l[6], sizeof(l[6]), "USB: detached");
-        snprintf(l[7], sizeof(l[7]), verifying ? "Verifying..." : "Uploading %3.0f%%", size > 0 ? recv * 100.0 / size : 0);
-        snprintf(l[8], sizeof(l[8]), "%.2f MB/s", rate / 1048576.0);
+        snprintf(l[7], sizeof(l[7]), up.verifying ? "Verifying..." : "Uploading %3.0f%%",
+                 up.size ? up.received * 100.0 / up.size : 0);
+        snprintf(l[8], sizeof(l[8]), "%.2f MB/s", up.rate_bps / 1048576.0);
     } else {
         if (usb_msc_host_mounted()) {
             snprintf(l[6], sizeof(l[6]), "USB: host connected");

@@ -218,20 +218,30 @@ void upload_check_stale(void)
     xSemaphoreGive(s_lock);
 }
 
+void upload_get_progress(upload_progress_t *out)
+{
+    out->active = s_up.active;
+    out->verifying = s_up.verifying;
+    out->size = s_up.size;
+    out->received = s_up.dispatched + s_up.cur_fill;
+    double secs = (esp_timer_get_time() - s_up.started_us) / 1e6;
+    out->rate_bps = (s_up.active && secs > 0.5) ? out->received / secs : 0;
+}
+
 void upload_status_json(cJSON *o)
 {
-    cJSON_AddBoolToObject(o, "active", s_up.active);
+    upload_progress_t p;
+    upload_get_progress(&p);
+    cJSON_AddBoolToObject(o, "active", p.active);
     cJSON_AddStringToObject(o, "name", s_up.name);
-    cJSON_AddNumberToObject(o, "size", (double)s_up.size);
-    uint64_t received = s_up.dispatched + s_up.cur_fill;
-    cJSON_AddNumberToObject(o, "received", (double)received);
+    cJSON_AddNumberToObject(o, "size", (double)p.size);
+    cJSON_AddNumberToObject(o, "received", (double)p.received);
     cJSON_AddNumberToObject(o, "written", (double)s_up.written);
     cJSON_AddStringToObject(o, "error", s_up.error);
-    cJSON_AddBoolToObject(o, "verifying", s_up.verifying);
+    cJSON_AddBoolToObject(o, "verifying", p.verifying);
     cJSON_AddNumberToObject(o, "verify_pos", (double)s_up.verify_pos);
     cJSON_AddStringToObject(o, "sha256", s_up.result_sha);
-    double secs = (esp_timer_get_time() - s_up.started_us) / 1e6;
-    cJSON_AddNumberToObject(o, "rate_bps", (s_up.active && secs > 0.5) ? received / secs : 0);
+    cJSON_AddNumberToObject(o, "rate_bps", p.rate_bps);
     cJSON_AddNumberToObject(o, "chunk_size", UP_CHUNK_HINT);
 }
 
