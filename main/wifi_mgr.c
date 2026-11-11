@@ -280,11 +280,14 @@ esp_err_t wifi_mgr_set_credentials(const char *ssid, const char *pass)
     if (!ssid || !ssid[0] || strlen(ssid) > 32 || (pass && strlen(pass) > 63)) {
         return ESP_ERR_INVALID_ARG;
     }
+    // Update the stored credentials under s_lock: mgr_task reads them (apply_sta_config)
+    // while holding it, and must not see a half-copied SSID or password.
+    xSemaphoreTake(s_lock, portMAX_DELAY);
     esp_err_t err = settings_set_wifi(ssid, pass);
     if (err != ESP_OK) {
+        xSemaphoreGive(s_lock);
         return err;
     }
-    xSemaphoreTake(s_lock, portMAX_DELAY);
     if (s_sta_connected || s_sta_connecting) {
         esp_wifi_disconnect();
     }

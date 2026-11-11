@@ -54,6 +54,12 @@ bool sdcard_try_mount(void)
         return false;
     }
     xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_present) {
+        // Another task mounted the card while we waited for the lock. Re-running
+        // init now would zero s_card under a live USB host.
+        xSemaphoreGive(s_lock);
+        return true;
+    }
     memset(&s_card, 0, sizeof(s_card));
     esp_err_t err = sdmmc_card_init(&s_host, &s_card);
     if (err == ESP_OK) {
