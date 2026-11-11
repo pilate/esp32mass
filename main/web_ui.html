@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>esp32mass</title>
+<style>
+:root{--bg:#0f1115;--card:#171a21;--line:#262b36;--fg:#e6e8ee;--mut:#8b93a7;--acc:#4cc2ff;--ok:#3ddc84;--warn:#ffb020;--bad:#ff5c5c}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+header{padding:14px 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px}
+header h1{font-size:18px;margin:0;font-weight:600}
+header .ver{color:var(--mut);font-size:13px}
+main{max-width:980px;margin:0 auto;padding:16px;display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px}
+.card h2{margin:0 0 12px;font-size:15px;font-weight:600;display:flex;justify-content:space-between;align-items:center}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;font-size:14px}
+.kv div:nth-child(odd){color:var(--mut)}
+.kv div:nth-child(even){word-break:break-all}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;background:var(--mut)}
+.dot.ok{background:var(--ok)}.dot.warn{background:var(--warn)}.dot.bad{background:var(--bad)}
+button{background:#232838;color:var(--fg);border:1px solid #333a4d;border-radius:7px;padding:7px 12px;font:inherit;cursor:pointer}
+button:hover{border-color:var(--acc)}
+button.primary{background:var(--acc);color:#04111a;border-color:var(--acc);font-weight:600}
+button.danger{border-color:#6a2a2a;color:#ff9b9b}
+button:disabled{opacity:.45;cursor:default}
+input[type=text],input[type=password],select{width:100%;background:#0f1218;color:var(--fg);border:1px solid #333a4d;border-radius:7px;padding:8px 10px;font:inherit}
+label{display:block;color:var(--mut);font-size:13px;margin:10px 0 4px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}
+.bar{height:10px;background:#0f1218;border-radius:6px;overflow:hidden;border:1px solid var(--line);margin-top:8px}
+.bar i{display:block;height:100%;width:0;background:var(--acc);transition:width .2s}
+.msg{margin-top:8px;font-size:13px;color:var(--mut);min-height:1.2em}
+.msg.bad{color:var(--bad)}.msg.ok{color:var(--ok)}
+pre{background:#0b0d12;border:1px solid var(--line);border-radius:7px;padding:10px;font-size:12px;max-height:300px;overflow:auto;white-space:pre-wrap;margin:0}
+.toggle{display:flex;align-items:center;gap:8px;margin:6px 0;font-size:14px}
+.drop{border:1.5px dashed #333a4d;border-radius:9px;padding:18px;text-align:center;color:var(--mut);cursor:pointer}
+.drop.over{border-color:var(--acc);color:var(--fg)}
+.net{display:flex;justify-content:space-between;padding:6px 8px;border-radius:6px;cursor:pointer}
+.net:hover{background:#232838}
+.wide{grid-column:1/-1}
+small{color:var(--mut)}
+</style>
+</head>
+<body>
+<header><h1>esp32mass</h1><span class="ver" id="ver"></span><span style="flex:1"></span><small id="uptime"></small></header>
+<main>
+
+<section class="card">
+  <h2>Status <button onclick="refresh()">Refresh</button></h2>
+  <div class="kv">
+    <div>Wi-Fi</div><div id="s-wifi"></div>
+    <div>Access point</div><div id="s-ap"></div>
+    <div>SD card</div><div id="s-card"></div>
+    <div>USB</div><div id="s-usb"></div>
+    <div>Image</div><div id="s-image"></div>
+    <div>Host I/O</div><div id="s-io"></div>
+    <div>Memory</div><div id="s-mem"></div>
+  </div>
+</section>
+
+<section class="card">
+  <h2>USB drive</h2>
+  <div class="row">
+    <button id="b-attach" class="primary" onclick="usb('attach')">Attach</button>
+    <button id="b-detach" onclick="usb('detach')">Detach</button>
+    <button onclick="usb('replug')">Re-plug</button>
+  </div>
+  <div class="toggle"><input type="checkbox" id="t-ro" onchange="setting('read_only',this.checked)"><span>Present as read-only (write protected)</span></div>
+  <div class="toggle"><input type="checkbox" id="t-auto" onchange="setting('auto_attach',this.checked)"><span>Attach automatically at boot and after upload</span></div>
+  <div class="toggle"><input type="checkbox" id="t-verify" onchange="setting('verify',this.checked)"><span>Read back and verify after upload</span></div>
+  <div class="row">
+    <button onclick="download(false)">Download image</button>
+    <button onclick="download(true)">Dump whole card</button>
+    <button class="danger" onclick="wipe()">Wipe partition table</button>
+  </div>
+  <div class="msg" id="m-usb"></div>
+</section>
+
+<section class="card wide">
+  <h2>Upload disk image</h2>
+  <div class="drop" id="drop">Drop a raw image here (.img, .iso, .bin) or click to choose<input type="file" id="file" hidden></div>
+  <div class="kv" style="margin-top:10px">
+    <div>File</div><div id="u-file">none</div>
+    <div>Progress</div><div id="u-prog">idle</div>
+  </div>
+  <div class="bar"><i id="u-bar"></i></div>
+  <div class="row">
+    <button id="b-upload" class="primary" onclick="startUpload()" disabled>Upload</button>
+    <button id="b-cancel" onclick="cancelUpload()" disabled>Cancel</button>
+  </div>
+  <div class="msg" id="m-upload"></div>
+  <small>Images are written to the card starting at sector 0, exactly like Rufus or dd. The USB drive is detached while writing and re-attached afterwards. Interrupted uploads resume automatically.</small>
+</section>
+
+<section class="card">
+  <h2>Wi-Fi <button onclick="scan()">Scan</button></h2>
+  <div id="nets"></div>
+  <label>Network name (SSID)</label><input type="text" id="w-ssid" maxlength="32" autocomplete="off">
+  <label>Password</label><input type="password" id="w-pass" maxlength="63">
+  <div class="row">
+    <button class="primary" onclick="saveWifi()">Connect &amp; save</button>
+    <button class="danger" onclick="forgetWifi()">Forget</button>
+  </div>
+  <div class="msg" id="m-wifi"></div>
+  <small>If the saved network is unreachable for 20 s the device brings its own access point back up.</small>
+</section>
+
+<section class="card">
+  <h2>Device</h2>
+  <label>Hostname (mDNS: name.local)</label><input type="text" id="d-host" maxlength="31">
+  <label>Access point password (empty = open, else 8+ chars)</label><input type="text" id="d-appass" maxlength="63" placeholder="unchanged">
+  <div class="row">
+    <button onclick="saveDevice()">Save</button>
+    <button onclick="reboot()">Reboot</button>
+  </div>
+  <label>Firmware update (.bin from the build folder)</label>
+  <input type="file" id="ota" accept=".bin">
+  <div class="row"><button onclick="ota()">Flash firmware</button></div>
+  <div class="msg" id="m-dev"></div>
+</section>
+
+<section class="card wide">
+  <h2>Log <span><label style="display:inline;margin:0 8px"><input type="checkbox" id="logauto" checked> auto</label><button onclick="loadLog()">Refresh</button></span></h2>
+  <pre id="log"></pre>
+</section>
+
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const fmt=b=>{b=+b||0;if(b>=2**30)return (b/2**30).toFixed(2)+' GiB';if(b>=2**20)return (b/2**20).toFixed(1)+' MiB';if(b>=1024)return (b/1024).toFixed(0)+' KiB';return b+' B'};
+const dot=c=>`<span class="dot ${c}"></span>`;
+let S=null, uploading=false, cancelReq=false;
+
+async function api(path,opts){const r=await fetch(path,Object.assign({cache:'no-store'},opts||{}));let j=null;try{j=await r.json()}catch(e){}if(!r.ok)throw new Error((j&&j.error)||('HTTP '+r.status));return j}
+const post=(p,b)=>api(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});
+function msg(id,t,c){const e=$(id);e.textContent=t||'';e.className='msg'+(c?' '+c:'')}
+
+function render(s){
+  S=s;$('ver').textContent='v'+s.version;$('uptime').textContent='up '+Math.floor(s.uptime_s/3600)+'h '+Math.floor(s.uptime_s%3600/60)+'m';
+  const w=s.wifi;
+  $('s-wifi').innerHTML=w.connected?`${dot('ok')}${w.ssid} &middot; ${w.ip} &middot; ${w.rssi} dBm`:w.configured?`${dot('warn')}${w.ssid}: ${w.connecting?'connecting':'not connected'}`:`${dot('bad')}not configured`;
+  $('s-ap').innerHTML=w.ap_active?`${dot('ok')}${w.ap_ssid} &middot; ${w.ap_ip} &middot; ${w.ap_clients} client(s)`:`${dot('')}off &middot; http://${w.hostname}.local`;
+  const c=s.card;
+  $('s-card').innerHTML=c.present?`${dot('ok')}${c.name||'card'} &middot; ${fmt(c.bytes)} &middot; ${(c.freq_khz/1000).toFixed(0)} MHz${c.errors?` &middot; <span style="color:var(--bad)">${c.errors} errors</span>`:''}`:`${dot('bad')}no card`;
+  const u=s.usb;
+  $('s-usb').innerHTML=u.attached?(u.host_mounted?`${dot('ok')}attached, host connected`:u.ejected?`${dot('warn')}ejected by host`:`${dot('warn')}attached, waiting for host`):`${dot('')}detached`;
+  $('s-usb').innerHTML+=s.settings.read_only?' &middot; read-only':' &middot; read/write';
+  const im=s.image;
+  $('s-image').innerHTML=im.size?`${im.name} &middot; ${fmt(im.size)}${im.time?' &middot; '+new Date(im.time*1000).toLocaleString():''}<br><small>${im.sha256}</small>`:'none recorded';
+  $('s-io').textContent=`read ${fmt(u.bytes_read)}, written ${fmt(u.bytes_written)}`+(u.last_io_age_s>=0?`, last ${u.last_io_age_s}s ago`:'')+((u.read_errors||u.write_errors)?`, errors r${u.read_errors}/w${u.write_errors}`:'');
+  $('s-mem').textContent=`${fmt(s.heap_free)} free, min ${fmt(s.heap_min)}, largest ${fmt(s.heap_largest)}`;
+  $('b-attach').disabled=u.attached||s.upload.active;$('b-detach').disabled=!u.attached||s.upload.active;
+  if(document.activeElement.type!=='checkbox'){$('t-ro').checked=s.settings.read_only;$('t-auto').checked=s.settings.auto_attach;$('t-verify').checked=s.settings.verify}
+  if(!$('d-host').value)$('d-host').value=s.settings.hostname;
+  if(!uploading){
+    const up=s.upload;
+    if(up.active){$('u-prog').textContent=(up.verifying?'verifying ':'receiving ')+fmt(up.received)+' / '+fmt(up.size)+' (another client)';$('u-bar').style.width=(100*up.received/up.size)+'%'}
+    else if(up.error&&up.error!=='aborted'){msg('m-upload','Last upload failed: '+up.error,'bad')}
+  }
+}
+async function refresh(){try{render(await api('/api/status'))}catch(e){console.warn(e)}}
+setInterval(refresh,2000);refresh();
+
+async function usb(action){msg('m-usb','');try{await post('/api/usb',{action});msg('m-usb',action+' done','ok')}catch(e){msg('m-usb',e.message,'bad')}refresh()}
+async function setting(k,v){const b={};b[k]=v;try{await post('/api/settings',b);msg('m-usb','saved','ok')}catch(e){msg('m-usb',e.message,'bad')}refresh()}
+async function download(full){
+  if(S&&S.usb.attached){if(!confirm('The drive must be detached from the host during download. Detach now?'))return;try{await post('/api/usb',{action:'detach'})}catch(e){msg('m-usb',e.message,'bad');return}}
+  location.href='/api/download'+(full?'?full=1':'');
+}
+async function wipe(){if(!confirm('Zero the first 2 MB of the card (partition table and boot sectors)?'))return;try{await post('/api/wipe');msg('m-usb','wiped','ok')}catch(e){msg('m-usb',e.message,'bad')}refresh()}
+
+// ---- Wi-Fi
+async function scan(){$('nets').innerHTML='<small>scanning…</small>';try{const r=await api('/api/scan');const n=(r.networks||[]).sort((a,b)=>b.rssi-a.rssi);$('nets').innerHTML=n.length?n.map(x=>`<div class="net" onclick="pick('${x.ssid.replace(/'/g,"\\'")}')"><span>${x.secure?'&#128274; ':''}${x.ssid}</span><small>${x.rssi} dBm &middot; ch${x.chan}</small></div>`).join(''):'<small>no networks found</small>'}catch(e){$('nets').innerHTML='<small>'+e.message+'</small>'}}
+function pick(s){$('w-ssid').value=s;$('w-pass').focus()}
+async function saveWifi(){msg('m-wifi','');try{const r=await post('/api/wifi',{ssid:$('w-ssid').value,pass:$('w-pass').value});msg('m-wifi',r.message,'ok')}catch(e){msg('m-wifi',e.message,'bad')}}
+async function forgetWifi(){if(!confirm('Forget the saved network? The device will fall back to its own access point.'))return;try{await post('/api/wifi/forget');msg('m-wifi','forgotten','ok')}catch(e){msg('m-wifi',e.message,'bad')}}
+
+// ---- Device
+async function saveDevice(){const b={hostname:$('d-host').value};if($('d-appass').value!=='')b.ap_pass=$('d-appass').value;try{await post('/api/settings',b);msg('m-dev','saved; hostname and AP password apply after reboot','ok')}catch(e){msg('m-dev',e.message,'bad')}}
+async function reboot(){if(!confirm('Reboot the device?'))return;try{await post('/api/reboot');msg('m-dev','rebooting…')}catch(e){msg('m-dev',e.message,'bad')}}
+async function ota(){const f=$('ota').files[0];if(!f){msg('m-dev','choose a .bin first','bad');return}if(!confirm('Flash '+f.name+' ('+fmt(f.size)+')?'))return;msg('m-dev','uploading firmware…');try{const r=await api('/api/ota',{method:'POST',body:f});msg('m-dev',r.message,'ok')}catch(e){msg('m-dev',e.message,'bad')}}
+
+// ---- Log
+async function loadLog(){try{const r=await fetch('/api/log',{cache:'no-store'});const t=await r.text();const p=$('log');const stick=p.scrollTop+p.clientHeight>=p.scrollHeight-4;p.textContent=t;if(stick)p.scrollTop=p.scrollHeight}catch(e){}}
+setInterval(()=>{if($('logauto').checked)loadLog()},3000);loadLog();
+
+// ---- Upload
+let file=null;
+const drop=$('drop');
+drop.onclick=()=>$('file').click();
+$('file').onchange=e=>setFile(e.target.files[0]);
+drop.ondragover=e=>{e.preventDefault();drop.classList.add('over')};
+drop.ondragleave=()=>drop.classList.remove('over');
+drop.ondrop=e=>{e.preventDefault();drop.classList.remove('over');setFile(e.dataTransfer.files[0])};
+function setFile(f){if(!f)return;file=f;$('u-file').textContent=f.name+' ('+fmt(f.size)+')';$('b-upload').disabled=false;msg('m-upload','');$('u-prog').textContent='ready';$('u-bar').style.width='0'}
+function cancelUpload(){cancelReq=true}
+
+// Streaming SHA-256 (plain JS, since crypto.subtle is unavailable over http://)
+class Sha256{constructor(){this.h=new Uint32Array([0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19]);this.buf=new Uint8Array(64);this.n=0;this.len=0;this.w=new Uint32Array(64)}
+ static K=new Uint32Array([0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2]);
+ block(p,o){const w=this.w,h=this.h,K=Sha256.K;for(let i=0;i<16;i++)w[i]=(p[o+4*i]<<24)|(p[o+4*i+1]<<16)|(p[o+4*i+2]<<8)|p[o+4*i+3];for(let i=16;i<64;i++){const a=w[i-15],b=w[i-2];const s0=((a>>>7)|(a<<25))^((a>>>18)|(a<<14))^(a>>>3);const s1=((b>>>17)|(b<<15))^((b>>>19)|(b<<13))^(b>>>10);w[i]=(w[i-16]+s0+w[i-7]+s1)|0}
+  let a=h[0],b=h[1],c=h[2],d=h[3],e=h[4],f=h[5],g=h[6],k=h[7];
+  for(let i=0;i<64;i++){const S1=((e>>>6)|(e<<26))^((e>>>11)|(e<<21))^((e>>>25)|(e<<7));const ch=(e&f)^(~e&g);const t1=(k+S1+ch+K[i]+w[i])|0;const S0=((a>>>2)|(a<<30))^((a>>>13)|(a<<19))^((a>>>22)|(a<<10));const mj=(a&b)^(a&c)^(b&c);const t2=(S0+mj)|0;k=g;g=f;f=e;e=(d+t1)|0;d=c;c=b;b=a;a=(t1+t2)|0}
+  h[0]=(h[0]+a)|0;h[1]=(h[1]+b)|0;h[2]=(h[2]+c)|0;h[3]=(h[3]+d)|0;h[4]=(h[4]+e)|0;h[5]=(h[5]+f)|0;h[6]=(h[6]+g)|0;h[7]=(h[7]+k)|0}
+ update(p){this.len+=p.length;let i=0;if(this.n){const t=Math.min(64-this.n,p.length);this.buf.set(p.subarray(0,t),this.n);this.n+=t;i=t;if(this.n<64)return;this.block(this.buf,0);this.n=0}for(;i+64<=p.length;i+=64)this.block(p,i);if(i<p.length){this.buf.set(p.subarray(i));this.n=p.length-i}}
+ hex(){const bits=this.len*8;const pad=new Uint8Array(((this.n<56)?56-this.n:120-this.n)+8);pad[0]=0x80;const dv=new DataView(pad.buffer);dv.setUint32(pad.length-8,Math.floor(bits/2**32));dv.setUint32(pad.length-4,bits>>>0);const l=this.len;this.update(pad);this.len=l;let s='';for(let i=0;i<8;i++)s+=(this.h[i]>>>0).toString(16).padStart(8,'0');return s}}
+
+async function hashFile(f,onprog){const h=new Sha256();const step=4*1024*1024;for(let o=0;o<f.size;o+=step){h.update(new Uint8Array(await f.slice(o,o+step).arrayBuffer()));onprog(Math.min(o+step,f.size));if(cancelReq)throw new Error('cancelled')}return h.hex()}
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+
+async function startUpload(){
+  if(!file||uploading)return;
+  if(S&&S.card&&!S.card.present){msg('m-upload','no SD card','bad');return}
+  if(S&&S.card&&file.size>S.card.bytes){msg('m-upload','image is larger than the card','bad');return}
+  if(!confirm('Write '+file.name+' ('+fmt(file.size)+') to the SD card? Everything on the card is overwritten.'))return;
+  uploading=true;cancelReq=false;$('b-upload').disabled=true;$('b-cancel').disabled=false;msg('m-upload','');
+  try{
+    $('u-prog').textContent='hashing…';
+    const sha=await hashFile(file,d=>{$('u-bar').style.width=(100*d/file.size)+'%';$('u-prog').textContent='hashing '+fmt(d)+' / '+fmt(file.size)});
+    const b=await post('/api/upload/begin',{name:file.name,size:file.size});
+    const chunk=b.chunk_size||1048576;
+    let off=0,t0=Date.now(),fails=0;
+    while(off<file.size){
+      if(cancelReq)throw new Error('cancelled');
+      const end=Math.min(off+chunk,file.size);
+      try{
+        const r=await fetch('/api/upload/chunk?offset='+off,{method:'PUT',body:file.slice(off,end),cache:'no-store'});
+        const j=await r.json().catch(()=>({}));
+        if(r.status===409&&typeof j.received==='number'){off=j.received;continue}
+        if(!r.ok)throw new Error(j.error||('HTTP '+r.status));
+        off=j.received;fails=0;
+      }catch(e){
+        if(cancelReq||/no upload|SD card|larger|past/.test(e.message))throw e;
+        if(++fails>30)throw new Error('too many transfer errors: '+e.message);
+        $('u-prog').textContent='connection lost, retrying ('+fails+')…';await sleep(2000);
+        try{const st=await api('/api/status');if(!st.upload.active)throw new Error('device dropped the upload: '+(st.upload.error||'unknown'));off=st.upload.received}catch(e2){if(/device dropped/.test(e2.message))throw e2}
+        continue;
+      }
+      const el=(Date.now()-t0)/1000,rate=off/el;
+      $('u-bar').style.width=(100*off/file.size)+'%';
+      $('u-prog').textContent=fmt(off)+' / '+fmt(file.size)+' · '+(rate/1048576).toFixed(2)+' MB/s · '+Math.max(0,Math.round((file.size-off)/rate))+' s left';
+    }
+    $('u-prog').textContent='finishing'+($('t-verify').checked?' and verifying…':'…');
+    const fin=await post('/api/upload/finish',{sha256:sha,verify:$('t-verify').checked});
+    $('u-bar').style.width='100%';$('u-prog').textContent='done in '+((Date.now()-t0)/1000).toFixed(0)+' s';
+    msg('m-upload','Image written'+(fin.verified?' and verified':'')+'. SHA-256 '+fin.sha256+(fin.sha256===sha?' matches the file.':' (browser hash '+sha+')'),fin.sha256===sha?'ok':'bad');
+  }catch(e){
+    msg('m-upload',e.message,'bad');$('u-prog').textContent='failed';
+    try{await post('/api/upload/abort')}catch(e2){}
+  }finally{uploading=false;$('b-upload').disabled=false;$('b-cancel').disabled=true;refresh()}
+}
+</script>
+</body>
+</html>
