@@ -209,7 +209,7 @@ class Sha256{constructor(){this.h=new Uint32Array([0x6a09e667,0xbb67ae85,0x3c6ef
  update(p){this.len+=p.length;let i=0;if(this.n){const t=Math.min(64-this.n,p.length);this.buf.set(p.subarray(0,t),this.n);this.n+=t;i=t;if(this.n<64)return;this.block(this.buf,0);this.n=0}for(;i+64<=p.length;i+=64)this.block(p,i);if(i<p.length){this.buf.set(p.subarray(i));this.n=p.length-i}}
  hex(){const bits=this.len*8;const pad=new Uint8Array(((this.n<56)?56-this.n:120-this.n)+8);pad[0]=0x80;const dv=new DataView(pad.buffer);dv.setUint32(pad.length-8,Math.floor(bits/2**32));dv.setUint32(pad.length-4,bits>>>0);const l=this.len;this.update(pad);this.len=l;let s='';for(let i=0;i<8;i++)s+=(this.h[i]>>>0).toString(16).padStart(8,'0');return s}}
 
-async function hashFile(f,onprog){const h=new Sha256();const step=4*1024*1024;for(let o=0;o<f.size;o+=step){h.update(new Uint8Array(await f.slice(o,o+step).arrayBuffer()));onprog(Math.min(o+step,f.size));if(cancelReq)throw new Error('cancelled')}return h.hex()}
+async function hashFile(f,onprog,stop){const h=new Sha256();const step=4*1024*1024;for(let o=0;o<f.size;o+=step){h.update(new Uint8Array(await f.slice(o,o+step).arrayBuffer()));onprog(Math.min(o+step,f.size));if(stop())throw new Error('cancelled')}return h.hex()}
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 
 async function startUpload(){
@@ -218,9 +218,13 @@ async function startUpload(){
   if(S&&S.card&&file.size>S.card.bytes){msg('m-upload','image is larger than the card','bad');return}
   if(!confirm('Write '+file.name+' ('+fmt(file.size)+') to the SD card? Everything on the card is overwritten.'))return;
   uploading=true;cancelReq=false;$('b-upload').disabled=true;$('b-cancel').disabled=false;msg('m-upload','');
+  let hashed=0,hashStop=false;
   try{
-    $('u-prog').textContent='hashing…';
-    const sha=await hashFile(file,d=>{$('u-bar').style.width=(100*d/file.size)+'%';$('u-prog').textContent='hashing '+fmt(d)+' / '+fmt(file.size)});
+    // Hash while uploading: reading the file locally is far faster than Wi-Fi, so the
+    // hash is normally ready long before /finish needs it, instead of adding to the total.
+    const shaP=hashFile(file,d=>{hashed=d},()=>cancelReq||hashStop);
+    shaP.catch(()=>{});   // awaited below; silences the unhandled-rejection warning if the upload fails first
+    $('u-prog').textContent='starting…';
     const b=await post('/api/upload/begin',{name:file.name,size:file.size});
     const chunk=b.chunk_size||1048576;
     let off=0,t0=Date.now(),fails=0;
@@ -248,8 +252,10 @@ async function startUpload(){
       }
       const el=(Date.now()-t0)/1000,rate=off/el;
       $('u-bar').style.width=(100*off/file.size)+'%';
-      $('u-prog').textContent=fmt(off)+' / '+fmt(file.size)+' · '+(rate/1048576).toFixed(2)+' MB/s · '+Math.max(0,Math.round((file.size-off)/rate))+' s left';
+      $('u-prog').textContent=fmt(off)+' / '+fmt(file.size)+' · '+(rate/1048576).toFixed(2)+' MB/s · '+Math.max(0,Math.round((file.size-off)/rate))+' s left'+(hashed<file.size?' · hashing '+Math.floor(100*hashed/file.size)+'%':'');
     }
+    if(hashed<file.size)$('u-prog').textContent='finishing local hash…';
+    const sha=await shaP;
     $('u-prog').textContent='finishing…';
     const fin=await post('/api/upload/finish',{sha256:sha,verify:$('t-verify').checked});
     let verified=!!fin.verified;
@@ -270,7 +276,7 @@ async function startUpload(){
   }catch(e){
     msg('m-upload',e.message,'bad');$('u-prog').textContent='failed';
     try{await post('/api/upload/abort')}catch(e2){}
-  }finally{uploading=false;$('b-upload').disabled=false;$('b-cancel').disabled=true;refresh()}
+  }finally{hashStop=true;uploading=false;$('b-upload').disabled=false;$('b-cancel').disabled=true;refresh()}
 }
 </script>
 </body>
