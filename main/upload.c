@@ -272,6 +272,10 @@ esp_err_t upload_begin_handler(httpd_req_t *req)
         xSemaphoreGive(s_lock);
         return web_send_error(req, "500 Internal Server Error", "out of memory for buffers");
     }
+    // The card is about to be overwritten, so the recorded image no longer describes
+    // it. Clearing now (rather than only on abort) keeps a failed or timed-out upload
+    // from leaving the old name and SHA-256 attached to a half-written card.
+    image_meta_clear();
     memset(s_up.name, 0, sizeof(s_up.name));
     strlcpy(s_up.name, name, sizeof(s_up.name));
     s_up.size = size;
@@ -524,7 +528,6 @@ esp_err_t upload_abort_handler(httpd_req_t *req)
     xSemaphoreTake(s_lock, portMAX_DELAY);
     if (s_up.active) {
         ESP_LOGW(TAG, "aborted by user at %llu bytes", (unsigned long long)(s_up.dispatched + s_up.cur_fill));
-        image_meta_clear();
         strlcpy(s_up.error, "aborted", sizeof(s_up.error));
         end_upload(true);
     }
