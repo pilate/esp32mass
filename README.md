@@ -67,7 +67,15 @@ TinyUSB owns it, so the ROM serial bootloader is not visible. To flash:
 3. Unplug and replug without BOOT.
 
 After the first flash, use the **Firmware update** box in the web UI with
-`build/esp32mass.bin` instead.
+`esp32mass.bin` from the build directory (`build/`, or wherever `-B` points)
+or `firmware/esp32mass-ota-<ver>.bin` instead.
+
+Web-UI updates can roll back. A new image boots on probation and is confirmed
+the first time the web UI (`/api/status`) or `/api/ota` is reached; if the
+device is reset before that, the bootloader returns to the previous firmware.
+The UI polls status, so keeping the page open through the reboot confirms the
+update. Rollback needs a bootloader built with it enabled, so it applies only
+after one serial flash of a full image built from this configuration.
 
 From WSL2 the port is only visible after `usbipd attach`. The simpler route is
 to flash from Windows with esptool (`pip install esptool`):

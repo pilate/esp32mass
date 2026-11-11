@@ -372,7 +372,7 @@ esp_err_t upload_chunk_handler(httpd_req_t *req)
             drain();
             discard_partial();
             xSemaphoreGive(s_lock);
-            return ESP_FAIL;   // connection is gone; client resumes from /api/upload/status
+            return ESP_FAIL;   // connection is gone; client resumes from upload.received in /api/status
         }
         timeouts = 0;
         mbedtls_sha256_update(&s_up.sha, s_buf[s_up.cur_idx] + s_up.cur_fill, r);
