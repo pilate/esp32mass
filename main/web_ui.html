@@ -129,24 +129,28 @@ small{color:var(--mut)}
 const $=id=>document.getElementById(id);
 const fmt=b=>{b=+b||0;if(b>=2**30)return (b/2**30).toFixed(2)+' GiB';if(b>=2**20)return (b/2**20).toFixed(1)+' MiB';if(b>=1024)return (b/1024).toFixed(0)+' KiB';return b+' B'};
 const dot=c=>`<span class="dot ${c}"></span>`;
+// Escape anything device- or network-supplied (SSIDs, file names) before it goes into innerHTML.
+const esc=v=>String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+// Required by the device on every POST/PUT; blocks cross-site requests (see csrf_guard in web.c).
+const XRW={'X-Requested-With':'esp32mass'};
 let S=null, uploading=false, cancelReq=false;
 
-async function api(path,opts){const r=await fetch(path,Object.assign({cache:'no-store'},opts||{}));let j=null;try{j=await r.json()}catch(e){}if(!r.ok)throw new Error((j&&j.error)||('HTTP '+r.status));return j}
+async function api(path,opts){opts=Object.assign({cache:'no-store'},opts||{});opts.headers=Object.assign({},XRW,opts.headers);const r=await fetch(path,opts);let j=null;try{j=await r.json()}catch(e){}if(!r.ok)throw new Error((j&&j.error)||('HTTP '+r.status));return j}
 const post=(p,b)=>api(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});
 function msg(id,t,c){const e=$(id);e.textContent=t||'';e.className='msg'+(c?' '+c:'')}
 
 function render(s){
   S=s;$('ver').textContent='v'+s.version;$('uptime').textContent='up '+Math.floor(s.uptime_s/3600)+'h '+Math.floor(s.uptime_s%3600/60)+'m';
   const w=s.wifi;
-  $('s-wifi').innerHTML=w.connected?`${dot('ok')}${w.ssid} &middot; ${w.ip} &middot; ${w.rssi} dBm`:w.configured?`${dot('warn')}${w.ssid}: ${w.connecting?'connecting':'not connected'}`:`${dot('bad')}not configured`;
-  $('s-ap').innerHTML=w.ap_active?`${dot('ok')}${w.ap_ssid} &middot; ${w.ap_ip} &middot; ${w.ap_clients} client(s)`:`${dot('')}off &middot; http://${w.hostname}.local`;
+  $('s-wifi').innerHTML=w.connected?`${dot('ok')}${esc(w.ssid)} &middot; ${esc(w.ip)} &middot; ${w.rssi} dBm`:w.configured?`${dot('warn')}${esc(w.ssid)}: ${w.connecting?'connecting':'not connected'}`:`${dot('bad')}not configured`;
+  $('s-ap').innerHTML=w.ap_active?`${dot('ok')}${esc(w.ap_ssid)} &middot; ${esc(w.ap_ip)} &middot; ${w.ap_clients} client(s)`:`${dot('')}off &middot; http://${esc(w.hostname)}.local`;
   const c=s.card;
-  $('s-card').innerHTML=c.present?`${dot('ok')}${c.name||'card'} &middot; ${fmt(c.bytes)} &middot; ${(c.freq_khz/1000).toFixed(0)} MHz${c.errors?` &middot; <span style="color:var(--bad)">${c.errors} errors</span>`:''}`:`${dot('bad')}no card`;
+  $('s-card').innerHTML=c.present?`${dot('ok')}${esc(c.name||'card')} &middot; ${fmt(c.bytes)} &middot; ${(c.freq_khz/1000).toFixed(0)} MHz${c.errors?` &middot; <span style="color:var(--bad)">${c.errors} errors</span>`:''}`:`${dot('bad')}no card`;
   const u=s.usb;
   $('s-usb').innerHTML=u.attached?(u.host_mounted?`${dot('ok')}attached, host connected`:u.ejected?`${dot('warn')}ejected by host`:`${dot('warn')}attached, waiting for host`):`${dot('')}detached`;
   $('s-usb').innerHTML+=s.settings.read_only?' &middot; read-only':' &middot; read/write';
   const im=s.image;
-  $('s-image').innerHTML=im.size?`${im.name} &middot; ${fmt(im.size)}${im.time?' &middot; '+new Date(im.time*1000).toLocaleString():''}<br><small>${im.sha256}</small>`:'none recorded';
+  $('s-image').innerHTML=im.size?`${esc(im.name)} &middot; ${fmt(im.size)}${im.time?' &middot; '+new Date(im.time*1000).toLocaleString():''}<br><small>${esc(im.sha256)}</small>`:'none recorded';
   $('s-io').textContent=`read ${fmt(u.bytes_read)}, written ${fmt(u.bytes_written)}`+(u.last_io_age_s>=0?`, last ${u.last_io_age_s}s ago`:'')+((u.read_errors||u.write_errors)?`, errors r${u.read_errors}/w${u.write_errors}`:'');
   $('s-mem').textContent=`${fmt(s.heap_free)} free, min ${fmt(s.heap_min)}, largest ${fmt(s.heap_largest)}`;
   $('b-attach').disabled=u.attached||s.upload.active;$('b-detach').disabled=!u.attached||s.upload.active;
@@ -170,7 +174,7 @@ async function download(full){
 async function wipe(){if(!confirm('Zero the first 2 MB of the card (partition table and boot sectors)?'))return;try{await post('/api/wipe');msg('m-usb','wiped','ok')}catch(e){msg('m-usb',e.message,'bad')}refresh()}
 
 // ---- Wi-Fi
-async function scan(){$('nets').innerHTML='<small>scanning…</small>';try{const r=await api('/api/scan');const n=(r.networks||[]).sort((a,b)=>b.rssi-a.rssi);$('nets').innerHTML=n.length?n.map(x=>`<div class="net" onclick="pick('${x.ssid.replace(/'/g,"\\'")}')"><span>${x.secure?'&#128274; ':''}${x.ssid}</span><small>${x.rssi} dBm &middot; ch${x.chan}</small></div>`).join(''):'<small>no networks found</small>'}catch(e){$('nets').innerHTML='<small>'+e.message+'</small>'}}
+async function scan(){$('nets').innerHTML='<small>scanning…</small>';try{const r=await api('/api/scan');const n=(r.networks||[]).sort((a,b)=>b.rssi-a.rssi);$('nets').innerHTML=n.length?n.map(x=>`<div class="net" data-ssid="${esc(x.ssid)}" onclick="pick(this.dataset.ssid)"><span>${x.secure?'&#128274; ':''}${esc(x.ssid)}</span><small>${x.rssi} dBm &middot; ch${x.chan}</small></div>`).join(''):'<small>no networks found</small>'}catch(e){$('nets').innerHTML='<small>'+esc(e.message)+'</small>'}}
 function pick(s){$('w-ssid').value=s;$('w-pass').focus()}
 async function saveWifi(){msg('m-wifi','');try{const r=await post('/api/wifi',{ssid:$('w-ssid').value,pass:$('w-pass').value});msg('m-wifi',r.message,'ok')}catch(e){msg('m-wifi',e.message,'bad')}}
 async function forgetWifi(){if(!confirm('Forget the saved network? The device will fall back to its own access point.'))return;try{await post('/api/wifi/forget');msg('m-wifi','forgotten','ok')}catch(e){msg('m-wifi',e.message,'bad')}}
@@ -224,7 +228,7 @@ async function startUpload(){
       if(cancelReq)throw new Error('cancelled');
       const end=Math.min(off+chunk,file.size);
       try{
-        const r=await fetch('/api/upload/chunk?offset='+off,{method:'PUT',body:file.slice(off,end),cache:'no-store'});
+        const r=await fetch('/api/upload/chunk?offset='+off,{method:'PUT',headers:XRW,body:file.slice(off,end),cache:'no-store'});
         const j=await r.json().catch(()=>({}));
         if(r.status===409&&typeof j.received==='number'){off=j.received;continue}
         if(!r.ok)throw new Error(j.error||('HTTP '+r.status));

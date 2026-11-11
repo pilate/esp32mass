@@ -111,12 +111,18 @@ the log is available in the UI and at `GET /api/log`.
 | POST | `/api/ota` | raw app `.bin` |
 | POST | `/api/reboot` | |
 
+Every POST and PUT must send an `X-Requested-With` header (any value). Browsers
+cannot add that header to a cross-site request without a CORS preflight, which
+the device never approves, so other websites cannot drive the API through your
+browser. Requests without it get `403`.
+
 Example with curl:
 
 ```sh
-curl -X POST http://esp32mass.local/api/upload/begin -d '{"name":"disk.img","size":104857600}'
-curl -T disk.img "http://esp32mass.local/api/upload/chunk?offset=0"
-curl -X POST http://esp32mass.local/api/upload/finish -d '{}'
+H='X-Requested-With: curl'
+curl -H "$H" -X POST http://esp32mass.local/api/upload/begin -d '{"name":"disk.img","size":104857600}'
+curl -H "$H" -T disk.img "http://esp32mass.local/api/upload/chunk?offset=0"
+curl -H "$H" -X POST http://esp32mass.local/api/upload/finish -d '{}'
 ```
 
 ## Layout on the card

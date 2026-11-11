@@ -489,6 +489,23 @@ static esp_err_t reboot_post(httpd_req_t *req)
     return web_send_json(req, o);
 }
 
+// State-changing requests must carry this header. A browser only sends a custom
+// header cross-origin after a CORS preflight, which this server never approves,
+// so this stops other websites from driving the API (wipe, OTA, ...) through
+// the user's browser.
+#define CSRF_HEADER "X-Requested-With"
+
+typedef esp_err_t (*handler_fn_t)(httpd_req_t *req);
+
+static esp_err_t csrf_guard(httpd_req_t *req)
+{
+    if (httpd_req_get_hdr_value_len(req, CSRF_HEADER) == 0) {
+        ESP_LOGW(TAG, "rejected %s without " CSRF_HEADER " header", req->uri);
+        return web_send_error(req, "403 Forbidden", "missing " CSRF_HEADER " header");
+    }
+    return ((handler_fn_t)req->user_ctx)(req);
+}
+
 // Captive portal: anything we do not know redirects to the UI.
 static esp_err_t redirect_get(httpd_req_t *req)
 {
@@ -540,7 +557,12 @@ esp_err_t web_start(void)
         { .uri = "/*",                  .method = HTTP_GET,  .handler = redirect_get },   // keep last
     };
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
-        httpd_register_uri_handler(s_server, &routes[i]);
+        httpd_uri_t r = routes[i];
+        if (r.method != HTTP_GET) {
+            r.user_ctx = (void *)r.handler;
+            r.handler = csrf_guard;
+        }
+        httpd_register_uri_handler(s_server, &r);
     }
     ESP_LOGI(TAG, "web UI on port 80");
     return ESP_OK;
