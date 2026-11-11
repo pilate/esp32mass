@@ -250,10 +250,23 @@ async function startUpload(){
       $('u-bar').style.width=(100*off/file.size)+'%';
       $('u-prog').textContent=fmt(off)+' / '+fmt(file.size)+' · '+(rate/1048576).toFixed(2)+' MB/s · '+Math.max(0,Math.round((file.size-off)/rate))+' s left';
     }
-    $('u-prog').textContent='finishing'+($('t-verify').checked?' and verifying…':'…');
+    $('u-prog').textContent='finishing…';
     const fin=await post('/api/upload/finish',{sha256:sha,verify:$('t-verify').checked});
+    let verified=!!fin.verified;
+    if(fin.verifying){
+      // 202: the device reads the card back in the background; poll until it finishes.
+      for(let pf=0;;){
+        if(cancelReq)throw new Error('cancelled');
+        await sleep(1000);
+        let st;try{st=await api('/api/status');pf=0}catch(e){if(++pf>30)throw new Error('lost contact while verifying: '+e.message);continue}
+        const up=st.upload;
+        if(!up.active||!up.verifying){if(up.error)throw new Error(up.error);verified=up.verified;break}
+        $('u-bar').style.width=(100*up.verify_pos/up.size)+'%';
+        $('u-prog').textContent='verifying '+fmt(up.verify_pos)+' / '+fmt(up.size);
+      }
+    }
     $('u-bar').style.width='100%';$('u-prog').textContent='done in '+((Date.now()-t0)/1000).toFixed(0)+' s';
-    msg('m-upload','Image written'+(fin.verified?' and verified':'')+'. SHA-256 '+fin.sha256+(fin.sha256===sha?' matches the file.':' (browser hash '+sha+')'),fin.sha256===sha?'ok':'bad');
+    msg('m-upload','Image written'+(verified?' and verified':'')+'. SHA-256 '+fin.sha256+(fin.sha256===sha?' matches the file.':' (browser hash '+sha+')'),fin.sha256===sha?'ok':'bad');
   }catch(e){
     msg('m-upload',e.message,'bad');$('u-prog').textContent='failed';
     try{await post('/api/upload/abort')}catch(e2){}

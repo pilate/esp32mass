@@ -1,4 +1,6 @@
-// Image upload pipeline: HTTP body -> ping-pong DMA buffers -> SD writer task.
+// Image upload pipeline: HTTP body -> ping-pong DMA buffers -> SD I/O task.
+// Read-back verify reuses the same buffers in the other direction: the SD I/O
+// task (core 0) reads one buffer while the verify task (core 1) hashes the other.
 #include <string.h>
 #include <strings.h>
 #include <stdlib.h>
@@ -24,10 +26,14 @@ static const char *TAG = "upload";
 #define UP_STALE_US        (120 * 1000000LL)
 #define UP_CHUNK_HINT      (1024 * 1024)   // what the browser should send per request
 
+typedef enum { JOB_WRITE, JOB_READ } up_op_t;
+
 typedef struct {
+    up_op_t op;
     int idx;
     uint32_t lba;
     uint32_t sectors;
+    esp_err_t err;                  // result, filled in for reads
 } up_job_t;
 
 static struct {
@@ -44,24 +50,33 @@ static struct {
     int64_t last_activity_us;
     volatile esp_err_t write_err;
     char error[96];
-    volatile bool verifying;
+    volatile bool verifying;        // background read-back running (upload still active)
+    volatile bool verify_cancel;    // abort requested while verifying
     volatile uint64_t verify_pos;
+    bool verified;                  // last upload passed read-back verify
     char result_sha[65];
     bool sha_inited;
 } s_up;
 
 static uint8_t *s_buf[UP_BUF_COUNT];
 static size_t s_buf_bytes;
-static QueueHandle_t s_free_q;
-static QueueHandle_t s_full_q;
+static QueueHandle_t s_free_q;     // buffer indexes ready to be filled
+static QueueHandle_t s_job_q;      // up_job_t for the SD I/O task
+static QueueHandle_t s_read_q;     // completed JOB_READs, in submission order
 static SemaphoreHandle_t s_lock;
+static TaskHandle_t s_verify_task;
 
-static void writer_task(void *arg)
+static void sd_io_task(void *arg)
 {
     (void)arg;
     up_job_t j;
     while (1) {
-        xQueueReceive(s_full_q, &j, portMAX_DELAY);
+        xQueueReceive(s_job_q, &j, portMAX_DELAY);
+        if (j.op == JOB_READ) {
+            j.err = sdcard_read(j.lba, s_buf[j.idx], j.sectors);
+            xQueueSend(s_read_q, &j, portMAX_DELAY);
+            continue;
+        }
         if (j.sectors) {
             esp_err_t e = sdcard_write(j.lba, s_buf[j.idx], j.sectors);
             if (e != ESP_OK) {
@@ -76,15 +91,22 @@ static void writer_task(void *arg)
     }
 }
 
+static void verify_task(void *arg);
+
 esp_err_t upload_init(void)
 {
     s_lock = xSemaphoreCreateMutex();
     s_free_q = xQueueCreate(UP_BUF_COUNT, sizeof(int));
-    s_full_q = xQueueCreate(UP_BUF_COUNT, sizeof(up_job_t));
-    if (!s_lock || !s_free_q || !s_full_q) {
+    s_job_q = xQueueCreate(UP_BUF_COUNT, sizeof(up_job_t));
+    s_read_q = xQueueCreate(UP_BUF_COUNT, sizeof(up_job_t));
+    if (!s_lock || !s_free_q || !s_job_q || !s_read_q) {
         return ESP_ERR_NO_MEM;
     }
-    if (xTaskCreatePinnedToCore(writer_task, "sd_writer", 4096, NULL, 5, NULL, 0) != pdPASS) {
+    if (xTaskCreatePinnedToCore(sd_io_task, "sd_io", 4096, NULL, 5, NULL, 0) != pdPASS) {
+        return ESP_ERR_NO_MEM;
+    }
+    // Core 1: the HTTP server lives there too but is idle while a verify runs.
+    if (xTaskCreatePinnedToCore(verify_task, "verify", 4096, NULL, 5, &s_verify_task, 1) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
     s_up.cur_idx = -1;
@@ -166,8 +188,9 @@ static void dispatch_current(void)
     if (sectors * SDCARD_SECTOR_SIZE > fill) {
         memset(s_buf[s_up.cur_idx] + fill, 0, sectors * SDCARD_SECTOR_SIZE - fill);
     }
-    up_job_t j = { .idx = s_up.cur_idx, .lba = (uint32_t)(s_up.dispatched / SDCARD_SECTOR_SIZE), .sectors = (uint32_t)sectors };
-    xQueueSend(s_full_q, &j, portMAX_DELAY);
+    up_job_t j = { .op = JOB_WRITE, .idx = s_up.cur_idx,
+                   .lba = (uint32_t)(s_up.dispatched / SDCARD_SECTOR_SIZE), .sectors = (uint32_t)sectors };
+    xQueueSend(s_job_q, &j, portMAX_DELAY);
     s_up.dispatched += fill;
     s_up.cur_idx = -1;
     s_up.cur_fill = 0;
@@ -191,6 +214,7 @@ static void end_upload(bool reattach)
     free_buffers();
     s_up.active = false;
     s_up.verifying = false;
+    s_up.verify_cancel = false;
     if (reattach && settings_get()->auto_attach && sdcard_present()) {
         usb_msc_set_attached(true);
     }
@@ -211,7 +235,8 @@ void upload_check_stale(void)
     if (xSemaphoreTake(s_lock, 0) != pdTRUE) {
         return;   // a handler is busy, so it is not stale
     }
-    if (esp_timer_get_time() - s_up.last_activity_us > UP_STALE_US) {
+    // A background verify sends no data for its whole run; it ends the upload itself.
+    if (!s_up.verifying && esp_timer_get_time() - s_up.last_activity_us > UP_STALE_US) {
         fail_upload("upload timed out waiting for data");
     }
     xSemaphoreGive(s_lock);
@@ -221,6 +246,7 @@ void upload_get_progress(upload_progress_t *out)
 {
     out->active = s_up.active;
     out->verifying = s_up.verifying;
+    out->verify_pos = s_up.verify_pos;
     out->size = s_up.size;
     out->received = s_up.dispatched + s_up.cur_fill;
     double secs = (esp_timer_get_time() - s_up.started_us) / 1e6;
@@ -238,7 +264,8 @@ void upload_status_json(cJSON *o)
     cJSON_AddNumberToObject(o, "written", (double)s_up.written);
     cJSON_AddStringToObject(o, "error", s_up.error);
     cJSON_AddBoolToObject(o, "verifying", p.verifying);
-    cJSON_AddNumberToObject(o, "verify_pos", (double)s_up.verify_pos);
+    cJSON_AddNumberToObject(o, "verify_pos", (double)p.verify_pos);
+    cJSON_AddBoolToObject(o, "verified", s_up.verified);
     cJSON_AddStringToObject(o, "sha256", s_up.result_sha);
     cJSON_AddNumberToObject(o, "rate_bps", p.rate_bps);
     cJSON_AddNumberToObject(o, "chunk_size", UP_CHUNK_HINT);
@@ -296,7 +323,9 @@ esp_err_t upload_begin_handler(httpd_req_t *req)
     s_up.error[0] = 0;
     s_up.result_sha[0] = 0;
     s_up.verifying = false;
+    s_up.verify_cancel = false;
     s_up.verify_pos = 0;
+    s_up.verified = false;
     s_up.started_us = esp_timer_get_time();
     s_up.last_activity_us = s_up.started_us;
     sha_reset();
@@ -327,6 +356,10 @@ esp_err_t upload_chunk_handler(httpd_req_t *req)
     if (!s_up.active) {
         xSemaphoreGive(s_lock);
         return web_send_error(req, "409 Conflict", "no upload in progress");
+    }
+    if (s_up.verifying) {
+        xSemaphoreGive(s_lock);
+        return web_send_error(req, "409 Conflict", "upload is complete and being verified");
     }
     uint64_t expected = s_up.dispatched + s_up.cur_fill;
     if (offset != expected) {
@@ -401,40 +434,109 @@ static void to_hex(const unsigned char *in, size_t n, char *out)
     out[2 * n] = 0;
 }
 
-static bool verify_readback(char *sha_out)
+static void save_image_meta(void)
 {
-    uint8_t *buf = s_buf[0];
-    size_t buf_sectors = s_buf_bytes / SDCARD_SECTOR_SIZE;
+    image_meta_t meta = {0};
+    strlcpy(meta.name, s_up.name, sizeof(meta.name));
+    meta.size = s_up.size;
+    strlcpy(meta.sha256, s_up.result_sha, sizeof(meta.sha256));
+    time_t now = time(NULL);
+    meta.time = now > 1600000000 ? (int64_t)now : 0;
+    image_meta_save(&meta);
+}
+
+static void submit_read(int idx, uint64_t *requested)
+{
+    uint64_t left = s_up.size - *requested;
+    uint32_t sectors = s_buf_bytes / SDCARD_SECTOR_SIZE;
+    if ((uint64_t)sectors * SDCARD_SECTOR_SIZE > left) {
+        sectors = (uint32_t)((left + SDCARD_SECTOR_SIZE - 1) / SDCARD_SECTOR_SIZE);
+    }
+    up_job_t j = { .op = JOB_READ, .idx = idx,
+                   .lba = (uint32_t)(*requested / SDCARD_SECTOR_SIZE), .sectors = sectors };
+    xQueueSend(s_job_q, &j, portMAX_DELAY);
+    *requested += (uint64_t)sectors * SDCARD_SECTOR_SIZE;
+}
+
+// Reads the image back and hashes it. Every buffer starts on the free queue; one
+// read is kept in flight per buffer, so the SD card is busy while we hash. Returns
+// with every buffer back on the free queue, whatever happened.
+static esp_err_t verify_readback(char *sha_out)
+{
     mbedtls_sha256_context ctx;
     mbedtls_sha256_init(&ctx);
     mbedtls_sha256_starts(&ctx, 0);
-    uint64_t pos = 0;
-    bool ok = true;
-    s_up.verifying = true;
-    while (pos < s_up.size) {
-        uint64_t left = s_up.size - pos;
-        size_t sectors = (size_t)((left + SDCARD_SECTOR_SIZE - 1) / SDCARD_SECTOR_SIZE);
-        if (sectors > buf_sectors) {
-            sectors = buf_sectors;
-        }
-        if (sdcard_read((uint32_t)(pos / SDCARD_SECTOR_SIZE), buf, sectors) != ESP_OK) {
-            ok = false;
-            break;
-        }
-        size_t bytes = sectors * SDCARD_SECTOR_SIZE;
-        if (bytes > left) {
-            bytes = (size_t)left;
-        }
-        mbedtls_sha256_update(&ctx, buf, bytes);
-        pos += bytes;
-        s_up.verify_pos = pos;
+    uint64_t requested = 0;
+    uint64_t hashed = 0;
+    int inflight = 0;
+    esp_err_t err = ESP_OK;
+
+    int idx;
+    while (requested < s_up.size && xQueueReceive(s_free_q, &idx, 0) == pdTRUE) {
+        submit_read(idx, &requested);
+        inflight++;
     }
+    while (inflight > 0) {
+        up_job_t j;
+        xQueueReceive(s_read_q, &j, portMAX_DELAY);
+        inflight--;
+        if (err == ESP_OK && s_up.verify_cancel) {
+            err = ESP_ERR_INVALID_STATE;
+        }
+        if (err == ESP_OK && j.err != ESP_OK) {
+            err = j.err;
+        }
+        if (err == ESP_OK) {
+            uint64_t bytes = (uint64_t)j.sectors * SDCARD_SECTOR_SIZE;
+            if (bytes > s_up.size - hashed) {
+                bytes = s_up.size - hashed;
+            }
+            mbedtls_sha256_update(&ctx, s_buf[j.idx], (size_t)bytes);
+            hashed += bytes;
+            s_up.verify_pos = hashed;
+        }
+        if (err == ESP_OK && requested < s_up.size) {
+            submit_read(j.idx, &requested);   // refill this buffer while we hash the other
+            inflight++;
+        } else {
+            xQueueSend(s_free_q, &j.idx, portMAX_DELAY);
+        }
+    }
+
     unsigned char digest[32];
     mbedtls_sha256_finish(&ctx, digest);
     mbedtls_sha256_free(&ctx);
     to_hex(digest, sizeof(digest), sha_out);
-    s_up.verifying = false;
-    return ok;
+    return err;
+}
+
+static void verify_task(void *arg)
+{
+    (void)arg;
+    while (1) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        int64_t t0 = esp_timer_get_time();
+        char readback[65];
+        esp_err_t err = verify_readback(readback);   // runs without s_lock (see upload_abort_handler)
+
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        double secs = (esp_timer_get_time() - t0) / 1e6;
+        if (err == ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "verify aborted by user");
+            strlcpy(s_up.error, "aborted", sizeof(s_up.error));
+            end_upload(true);
+        } else if (err != ESP_OK) {
+            fail_upload("SD card read error during verify");
+        } else if (strcmp(readback, s_up.result_sha) != 0) {
+            fail_upload("read-back verify failed: card contents do not match upload");
+        } else {
+            ESP_LOGI(TAG, "verify OK in %.1f s (%.2f MB/s)", secs, secs > 0 ? s_up.size / secs / 1048576.0 : 0);
+            s_up.verified = true;
+            save_image_meta();
+            end_upload(true);
+        }
+        xSemaphoreGive(s_lock);
+    }
 }
 
 esp_err_t upload_finish_handler(httpd_req_t *req)
@@ -458,6 +560,10 @@ esp_err_t upload_finish_handler(httpd_req_t *req)
     if (!s_up.active) {
         xSemaphoreGive(s_lock);
         return web_send_error(req, "409 Conflict", "no upload in progress");
+    }
+    if (s_up.verifying) {
+        xSemaphoreGive(s_lock);
+        return web_send_error(req, "409 Conflict", "verify already in progress");
     }
     uint64_t total = s_up.dispatched + s_up.cur_fill;
     if (total != s_up.size) {
@@ -493,46 +599,34 @@ esp_err_t upload_finish_handler(httpd_req_t *req)
         return web_send_error(req, "500 Internal Server Error", s_up.error);
     }
 
-    bool verified = false;
+    cJSON *o = web_json_ok();
+    cJSON_AddStringToObject(o, "sha256", s_up.result_sha);
     if (verify) {
-        char readback[65];
-        int64_t t0 = esp_timer_get_time();
-        bool ok = verify_readback(readback);
-        if (!ok) {
-            fail_upload("SD card read error during verify");
-            xSemaphoreGive(s_lock);
-            return web_send_error(req, "500 Internal Server Error", s_up.error);
-        }
-        if (strcmp(readback, s_up.result_sha) != 0) {
-            fail_upload("read-back verify failed: card contents do not match upload");
-            xSemaphoreGive(s_lock);
-            return web_send_error(req, "500 Internal Server Error", s_up.error);
-        }
-        verified = true;
-        ESP_LOGI(TAG, "verify OK in %.1f s", (esp_timer_get_time() - t0) / 1e6);
+        // Reading back a multi-GB image takes minutes; doing it here would block the
+        // single-threaded HTTP server, so status polls could not even show progress.
+        // The upload stays active until verify_task ends it.
+        s_up.verifying = true;
+        s_up.verify_pos = 0;
+        xTaskNotifyGive(s_verify_task);
+        xSemaphoreGive(s_lock);
+        cJSON_AddBoolToObject(o, "verifying", true);
+        httpd_resp_set_status(req, "202 Accepted");
+        return web_send_json(req, o);
     }
-
-    image_meta_t meta = {0};
-    strlcpy(meta.name, s_up.name, sizeof(meta.name));
-    meta.size = s_up.size;
-    strlcpy(meta.sha256, s_up.result_sha, sizeof(meta.sha256));
-    time_t now = time(NULL);
-    meta.time = now > 1600000000 ? (int64_t)now : 0;
-    image_meta_save(&meta);
-
+    save_image_meta();
     end_upload(true);
     xSemaphoreGive(s_lock);
-
-    cJSON *o = web_json_ok();
-    cJSON_AddStringToObject(o, "sha256", meta.sha256);
-    cJSON_AddBoolToObject(o, "verified", verified);
+    cJSON_AddBoolToObject(o, "verified", false);
     return web_send_json(req, o);
 }
 
 esp_err_t upload_abort_handler(httpd_req_t *req)
 {
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    if (s_up.active) {
+    if (s_up.verifying) {
+        // verify_task owns the buffers; ask it to stop and let it end the upload.
+        s_up.verify_cancel = true;
+    } else if (s_up.active) {
         ESP_LOGW(TAG, "aborted by user at %llu bytes", (unsigned long long)(s_up.dispatched + s_up.cur_fill));
         strlcpy(s_up.error, "aborted", sizeof(s_up.error));
         end_upload(true);

@@ -109,8 +109,8 @@ static void update_display(void)
     upload_get_progress(&up);
     if (up.active) {
         snprintf(l[6], sizeof(l[6]), "USB: detached");
-        snprintf(l[7], sizeof(l[7]), up.verifying ? "Verifying..." : "Uploading %3.0f%%",
-                 up.size ? up.received * 100.0 / up.size : 0);
+        snprintf(l[7], sizeof(l[7]), up.verifying ? "Verifying %3.0f%%" : "Uploading %3.0f%%",
+                 up.size ? (up.verifying ? up.verify_pos : up.received) * 100.0 / up.size : 0);
         snprintf(l[8], sizeof(l[8]), "%.2f MB/s", up.rate_bps / 1048576.0);
     } else {
         if (usb_msc_host_mounted()) {

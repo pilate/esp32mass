@@ -111,7 +111,7 @@ the log is available in the UI and at `GET /api/log`.
 | POST | `/api/usb` | `{"action":"attach"|"detach"|"replug"}` |
 | POST | `/api/upload/begin` | `{"name","size"}` detaches USB |
 | PUT | `/api/upload/chunk?offset=N` | raw bytes, sequential; 409 with `received` on mismatch |
-| POST | `/api/upload/finish` | `{"sha256"?, "verify"?}` re-attaches USB |
+| POST | `/api/upload/finish` | `{"sha256"?, "verify"?}` re-attaches USB; with verify on, returns `202` and reads the card back in the background: poll `/api/status` until `upload.verifying` is false, then `upload.error` / `upload.verified` give the result |
 | POST | `/api/upload/abort` | |
 | GET | `/api/download` | the recorded image (`?full=1` for the whole card); USB must be detached |
 | POST | `/api/wipe` | zero the first 2 MB and last 1 MB (partition tables incl. backup GPT) |
@@ -144,7 +144,10 @@ for ((off = START; off < SIZE; off += CHUNK)); do
     curl -fsS -H "$H" -X PUT --data-binary @- "$URL/api/upload/chunk?offset=$off" || exit 1
 done
 curl -fsS -H "$H" -X POST "$URL/api/upload/finish" \
-     -d "{\"sha256\":\"$(sha256sum "$IMG" | cut -d' ' -f1)\"}"
+     -d "{\"sha256\":\"$(sha256sum "$IMG" | cut -d' ' -f1)\"}" || exit 1
+# With read-back verify on, finish returns 202 and the card is checked in the background.
+until curl -fsS "$URL/api/status" | grep -q '"verifying":false'; do sleep 2; done
+curl -fsS "$URL/api/status" | grep -o '"error":"[^"]*","verifying":false,[^}]*'
 ```
 
 `--data-binary @-` (not `-T -`) matters: piping into `-T` uses chunked transfer
