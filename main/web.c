@@ -158,7 +158,7 @@ static esp_err_t status_get(httpd_req_t *req)
     cJSON_AddBoolToObject(w, "connecting", ws.sta_connecting);
     cJSON_AddStringToObject(w, "ssid", ws.sta_ssid);
     cJSON_AddStringToObject(w, "ip", ws.sta_ip);
-    cJSON_AddNumberToObject(w, "rssi", ws.rssi);
+    cJSON_AddNumberToObject(w, "rssi", wifi_mgr_get_rssi());
     cJSON_AddBoolToObject(w, "ap_active", ws.ap_active);
     cJSON_AddStringToObject(w, "ap_ssid", ws.ap_ssid);
     cJSON_AddStringToObject(w, "ap_ip", ws.ap_ip);

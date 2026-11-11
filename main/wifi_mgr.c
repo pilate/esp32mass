@@ -266,12 +266,6 @@ void wifi_mgr_get_status(wifi_mgr_status_t *out)
     strlcpy(out->sta_ssid, s->wifi_ssid, sizeof(out->sta_ssid));
     strlcpy(out->sta_ip, s_sta_ip, sizeof(out->sta_ip));
     strlcpy(out->hostname, s->hostname, sizeof(out->hostname));
-    if (s_sta_connected) {
-        wifi_ap_record_t ap;
-        if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
-            out->rssi = ap.rssi;
-        }
-    }
     out->ap_active = s_ap_active;
     out->ap_clients = s_ap_clients;
     strlcpy(out->ap_ssid, s_ap_ssid, sizeof(out->ap_ssid));
@@ -281,6 +275,15 @@ void wifi_mgr_get_status(wifi_mgr_status_t *out)
             snprintf(out->ap_ip, sizeof(out->ap_ip), IPSTR, IP2STR(&ip.ip));
         }
     }
+}
+
+int wifi_mgr_get_rssi(void)
+{
+    wifi_ap_record_t ap;
+    if (s_sta_connected && esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+        return ap.rssi;
+    }
+    return 0;
 }
 
 esp_err_t wifi_mgr_set_credentials(const char *ssid, const char *pass)
