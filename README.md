@@ -81,7 +81,7 @@ From WSL2 the port is only visible after `usbipd attach`. The simpler route is
 to flash from Windows with esptool (`pip install esptool`):
 
 ```powershell
-esptool --chip esp32s3 -p COM5 -b 460800 write_flash 0x0 firmware\esp32mass-full-0.1.0.bin
+esptool --chip esp32s3 -p COM5 -b 460800 write_flash 0x0 firmware\esp32mass-full-0.2.0.bin
 ```
 
 ## Using it
