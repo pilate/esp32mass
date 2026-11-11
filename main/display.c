@@ -127,7 +127,7 @@ void display_lines(const char *const lines[DISPLAY_ROWS])
     }
     for (int r = 0; r < DISPLAY_ROWS; r++) {
         const char *t = lines[r] ? lines[r] : "";
-        if (strncmp(t, s_shadow[r], DISPLAY_COLS) == 0 && (s_shadow[r][0] || !t[0])) {
+        if (strncmp(t, s_shadow[r], DISPLAY_COLS) == 0) {
             continue;
         }
         strlcpy(s_shadow[r], t, sizeof(s_shadow[r]));
