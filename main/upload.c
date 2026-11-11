@@ -19,7 +19,6 @@
 
 static const char *TAG = "upload";
 
-#define UP_SECTOR          512
 #define UP_BUF_SECTORS     64            // 32 KB per buffer
 #define UP_BUF_COUNT       2
 #define UP_STALE_US        (120 * 1000000LL)
@@ -70,7 +69,7 @@ static void writer_task(void *arg)
                     s_up.write_err = e;
                 }
             } else {
-                s_up.written += (uint64_t)j.sectors * UP_SECTOR;
+                s_up.written += (uint64_t)j.sectors * SDCARD_SECTOR_SIZE;
             }
         }
         xQueueSend(s_free_q, &j.idx, portMAX_DELAY);
@@ -122,7 +121,7 @@ static bool alloc_buffers(void)
 {
     size_t sectors = UP_BUF_SECTORS;
     while (sectors >= 8) {
-        size_t bytes = sectors * UP_SECTOR;
+        size_t bytes = sectors * SDCARD_SECTOR_SIZE;
         bool ok = true;
         for (int i = 0; i < UP_BUF_COUNT; i++) {
             s_buf[i] = heap_caps_malloc(bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
@@ -163,11 +162,11 @@ static void dispatch_current(void)
 {
     // Pads the partially filled buffer with zeros up to a sector boundary.
     size_t fill = s_up.cur_fill;
-    size_t sectors = (fill + UP_SECTOR - 1) / UP_SECTOR;
-    if (sectors * UP_SECTOR > fill) {
-        memset(s_buf[s_up.cur_idx] + fill, 0, sectors * UP_SECTOR - fill);
+    size_t sectors = (fill + SDCARD_SECTOR_SIZE - 1) / SDCARD_SECTOR_SIZE;
+    if (sectors * SDCARD_SECTOR_SIZE > fill) {
+        memset(s_buf[s_up.cur_idx] + fill, 0, sectors * SDCARD_SECTOR_SIZE - fill);
     }
-    up_job_t j = { .idx = s_up.cur_idx, .lba = (uint32_t)(s_up.dispatched / UP_SECTOR), .sectors = (uint32_t)sectors };
+    up_job_t j = { .idx = s_up.cur_idx, .lba = (uint32_t)(s_up.dispatched / SDCARD_SECTOR_SIZE), .sectors = (uint32_t)sectors };
     xQueueSend(s_full_q, &j, portMAX_DELAY);
     s_up.dispatched += fill;
     s_up.cur_idx = -1;
@@ -405,7 +404,7 @@ static void to_hex(const unsigned char *in, size_t n, char *out)
 static bool verify_readback(char *sha_out)
 {
     uint8_t *buf = s_buf[0];
-    size_t buf_sectors = s_buf_bytes / UP_SECTOR;
+    size_t buf_sectors = s_buf_bytes / SDCARD_SECTOR_SIZE;
     mbedtls_sha256_context ctx;
     mbedtls_sha256_init(&ctx);
     mbedtls_sha256_starts(&ctx, 0);
@@ -414,15 +413,15 @@ static bool verify_readback(char *sha_out)
     s_up.verifying = true;
     while (pos < s_up.size) {
         uint64_t left = s_up.size - pos;
-        size_t sectors = (size_t)((left + UP_SECTOR - 1) / UP_SECTOR);
+        size_t sectors = (size_t)((left + SDCARD_SECTOR_SIZE - 1) / SDCARD_SECTOR_SIZE);
         if (sectors > buf_sectors) {
             sectors = buf_sectors;
         }
-        if (sdcard_read((uint32_t)(pos / UP_SECTOR), buf, sectors) != ESP_OK) {
+        if (sdcard_read((uint32_t)(pos / SDCARD_SECTOR_SIZE), buf, sectors) != ESP_OK) {
             ok = false;
             break;
         }
-        size_t bytes = sectors * UP_SECTOR;
+        size_t bytes = sectors * SDCARD_SECTOR_SIZE;
         if (bytes > left) {
             bytes = (size_t)left;
         }

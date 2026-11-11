@@ -62,6 +62,10 @@ bool sdcard_try_mount(void)
     }
     memset(&s_card, 0, sizeof(s_card));
     esp_err_t err = sdmmc_card_init(&s_host, &s_card);
+    if (err == ESP_OK && s_card.csd.sector_size != SDCARD_SECTOR_SIZE) {
+        ESP_LOGE(TAG, "unsupported sector size %d", s_card.csd.sector_size);
+        err = ESP_ERR_NOT_SUPPORTED;
+    }
     if (err == ESP_OK) {
         s_present = true;
         s_consecutive_errors = 0;
@@ -69,8 +73,8 @@ bool sdcard_try_mount(void)
         memcpy(name, s_card.cid.name, sizeof(s_card.cid.name) < 7 ? sizeof(s_card.cid.name) : 7);
         ESP_LOGI(TAG, "card '%s': %llu MB, %lu x %lu B sectors, %lu kHz, %d-bit",
                  name,
-                 (unsigned long long)((uint64_t)s_card.csd.capacity * s_card.csd.sector_size / (1024 * 1024)),
-                 (unsigned long)s_card.csd.capacity, (unsigned long)s_card.csd.sector_size,
+                 (unsigned long long)((uint64_t)s_card.csd.capacity * SDCARD_SECTOR_SIZE / (1024 * 1024)),
+                 (unsigned long)s_card.csd.capacity, (unsigned long)SDCARD_SECTOR_SIZE,
                  (unsigned long)s_card.real_freq_khz, s_card.log_bus_width ? (1 << s_card.log_bus_width) : 1);
     } else {
         int64_t now = esp_timer_get_time();
@@ -93,14 +97,9 @@ uint32_t sdcard_sector_count(void)
     return s_present ? s_card.csd.capacity : 0;
 }
 
-uint32_t sdcard_sector_size(void)
-{
-    return s_present ? s_card.csd.sector_size : 512;
-}
-
 uint64_t sdcard_capacity_bytes(void)
 {
-    return (uint64_t)sdcard_sector_count() * sdcard_sector_size();
+    return (uint64_t)sdcard_sector_count() * SDCARD_SECTOR_SIZE;
 }
 
 static void note_error(esp_err_t err, const char *op, uint32_t lba, uint32_t n)

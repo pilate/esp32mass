@@ -166,13 +166,8 @@ bool tud_msc_test_unit_ready_cb(uint8_t lun)
 void tud_msc_capacity_cb(uint8_t lun, uint32_t *block_count, uint16_t *block_size)
 {
     (void)lun;
-    if (s_media_present && sdcard_present()) {
-        *block_count = sdcard_sector_count();
-        *block_size = (uint16_t)sdcard_sector_size();
-    } else {
-        *block_count = 0;
-        *block_size = 512;
-    }
+    *block_count = (s_media_present && sdcard_present()) ? sdcard_sector_count() : 0;
+    *block_size = SDCARD_SECTOR_SIZE;
 }
 
 bool tud_msc_is_writable_cb(uint8_t lun)
@@ -215,9 +210,8 @@ int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset, void *buff
         tud_msc_set_sense(lun, SCSI_SENSE_NOT_READY, 0x3A, 0x00);
         return -1;
     }
-    uint32_t ss = sdcard_sector_size();
     uint32_t total = sdcard_sector_count();
-    uint32_t n = bufsize / ss;
+    uint32_t n = bufsize / SDCARD_SECTOR_SIZE;
     if (lba >= total) {
         tud_msc_set_sense(lun, SCSI_SENSE_ILLEGAL_REQUEST, 0x21, 0x00);   // LBA out of range
         return -1;
@@ -233,9 +227,9 @@ int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset, void *buff
         tud_msc_set_sense(lun, SCSI_SENSE_MEDIUM_ERROR, 0x11, 0x00);   // unrecovered read error
         return -1;
     }
-    s_stats.bytes_read += (uint64_t)n * ss;
+    s_stats.bytes_read += (uint64_t)n * SDCARD_SECTOR_SIZE;
     s_stats.last_io_us = esp_timer_get_time();
-    return (int32_t)(n * ss);
+    return (int32_t)(n * SDCARD_SECTOR_SIZE);
 }
 
 int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset, uint8_t *buffer, uint32_t bufsize)
@@ -249,9 +243,8 @@ int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset, uint8_t *
         tud_msc_set_sense(lun, SCSI_SENSE_DATA_PROTECT, 0x27, 0x00);   // write protected
         return -1;
     }
-    uint32_t ss = sdcard_sector_size();
     uint32_t total = sdcard_sector_count();
-    uint32_t n = bufsize / ss;
+    uint32_t n = bufsize / SDCARD_SECTOR_SIZE;
     if (lba >= total) {
         tud_msc_set_sense(lun, SCSI_SENSE_ILLEGAL_REQUEST, 0x21, 0x00);
         return -1;
@@ -267,9 +260,9 @@ int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset, uint8_t *
         tud_msc_set_sense(lun, SCSI_SENSE_MEDIUM_ERROR, 0x0C, 0x00);   // write error
         return -1;
     }
-    s_stats.bytes_written += (uint64_t)n * ss;
+    s_stats.bytes_written += (uint64_t)n * SDCARD_SECTOR_SIZE;
     s_stats.last_io_us = esp_timer_get_time();
-    return (int32_t)(n * ss);
+    return (int32_t)(n * SDCARD_SECTOR_SIZE);
 }
 
 int32_t tud_msc_scsi_cb(uint8_t lun, uint8_t const scsi_cmd[16], void *buffer, uint16_t bufsize)

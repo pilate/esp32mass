@@ -171,7 +171,7 @@ static esp_err_t status_get(httpd_req_t *req)
     cJSON *c = cJSON_AddObjectToObject(o, "card");
     cJSON_AddBoolToObject(c, "present", sdcard_present());
     cJSON_AddNumberToObject(c, "sectors", sdcard_sector_count());
-    cJSON_AddNumberToObject(c, "sector_size", sdcard_sector_size());
+    cJSON_AddNumberToObject(c, "sector_size", SDCARD_SECTOR_SIZE);
     cJSON_AddNumberToObject(c, "bytes", (double)sdcard_capacity_bytes());
     cJSON_AddStringToObject(c, "name", name);
     cJSON_AddNumberToObject(c, "freq_khz", freq);
@@ -356,7 +356,7 @@ static esp_err_t download_get(httpd_req_t *req)
         return web_send_error(req, "404 Not Found", "no image recorded; use ?full=1 to dump the whole card");
     }
     const size_t buf_sectors = 64;
-    uint8_t *buf = heap_caps_malloc(buf_sectors * 512, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    uint8_t *buf = heap_caps_malloc(buf_sectors * SDCARD_SECTOR_SIZE, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
     if (!buf) {
         return web_send_error(req, "500 Internal Server Error", "out of memory");
     }
@@ -368,15 +368,15 @@ static esp_err_t download_get(httpd_req_t *req)
     esp_err_t err = ESP_OK;
     while (pos < total) {
         uint64_t left = total - pos;
-        size_t sectors = (size_t)((left + 511) / 512);
+        size_t sectors = (size_t)((left + SDCARD_SECTOR_SIZE - 1) / SDCARD_SECTOR_SIZE);
         if (sectors > buf_sectors) {
             sectors = buf_sectors;
         }
-        if (sdcard_read((uint32_t)(pos / 512), buf, sectors) != ESP_OK) {
+        if (sdcard_read((uint32_t)(pos / SDCARD_SECTOR_SIZE), buf, sectors) != ESP_OK) {
             err = ESP_FAIL;
             break;
         }
-        size_t bytes = sectors * 512;
+        size_t bytes = sectors * SDCARD_SECTOR_SIZE;
         if (bytes > left) {
             bytes = (size_t)left;
         }
@@ -419,7 +419,7 @@ static esp_err_t wipe_post(httpd_req_t *req)
     }
     // Allocate before detaching so running out of memory leaves the USB state alone.
     const size_t buf_sectors = 64;
-    uint8_t *zeros = heap_caps_calloc(1, buf_sectors * 512, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    uint8_t *zeros = heap_caps_calloc(1, buf_sectors * SDCARD_SECTOR_SIZE, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
     if (!zeros) {
         return web_send_error(req, "500 Internal Server Error", "out of memory");
     }
