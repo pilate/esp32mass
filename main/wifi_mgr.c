@@ -20,7 +20,9 @@ static const char *TAG = "wifi";
 
 #define AP_FALLBACK_S       20   // STA down this long -> bring up the access point
 #define AP_LINGER_S         120  // STA up and AP idle this long -> drop the access point
-#define RECONNECT_DELAY_S   3
+#define RECONNECT_DELAY_S   3    // first retry; doubles per consecutive failure...
+#define RECONNECT_MAX_S     60   // ...up to this
+#define RECONNECT_AP_USER_S 30   // minimum while someone is connected to our access point
 #define CONNECT_WATCHDOG_S  30
 
 static esp_netif_t *s_sta_netif;
@@ -36,6 +38,7 @@ static bool s_sntp_started;
 static int64_t s_boot_us;
 static int64_t s_last_connected_us;   // last time STA had an IP (or creds changed)
 static int64_t s_next_connect_us;     // when to try esp_wifi_connect next
+static int s_connect_failures;        // consecutive failed attempts, reset on IP or new credentials
 static int64_t s_connect_started_us;
 static int64_t s_ap_up_us;
 static int s_ap_clients;
@@ -105,6 +108,23 @@ static void set_ap_enabled(bool on)
     }
 }
 
+// Each connect attempt scans all channels, which pulls the shared radio off the access
+// point's channel and stalls anyone using the setup portal. With a wrong password or an
+// absent network that used to happen every 3 s, so back off exponentially, and further
+// while the portal has a client.
+static int64_t reconnect_delay_us(void)
+{
+    int shift = s_connect_failures < 5 ? s_connect_failures : 5;
+    int64_t d = (int64_t)RECONNECT_DELAY_S << shift;
+    if (d > RECONNECT_MAX_S) {
+        d = RECONNECT_MAX_S;
+    }
+    if (s_ap_active && s_ap_clients > 0 && d < RECONNECT_AP_USER_S) {
+        d = RECONNECT_AP_USER_S;
+    }
+    return d * 1000000LL;
+}
+
 static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
@@ -118,15 +138,22 @@ static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *da
             break;
         case WIFI_EVENT_STA_DISCONNECTED: {
             wifi_event_sta_disconnected_t *e = data;
-            if (s_sta_connected) {
-                ESP_LOGW(TAG, "disconnected from '%s' (reason %d)", settings_get()->wifi_ssid, e->reason);
+            bool was_connected = s_sta_connected;
+            if (s_sta_connecting) {
+                s_connect_failures++;   // the attempt itself failed (the watchdog counts its own)
+            }
+            int64_t delay = reconnect_delay_us();
+            if (was_connected) {
+                ESP_LOGW(TAG, "disconnected from '%s' (reason %d), retrying in %d s",
+                         settings_get()->wifi_ssid, e->reason, (int)(delay / 1000000));
             } else if (s_sta_connecting) {
-                ESP_LOGW(TAG, "connect to '%s' failed (reason %d)", settings_get()->wifi_ssid, e->reason);
+                ESP_LOGW(TAG, "connect to '%s' failed (reason %d), retrying in %d s",
+                         settings_get()->wifi_ssid, e->reason, (int)(delay / 1000000));
             }
             s_sta_connected = false;
             s_sta_connecting = false;
             s_sta_ip[0] = 0;
-            s_next_connect_us = esp_timer_get_time() + RECONNECT_DELAY_S * 1000000LL;
+            s_next_connect_us = esp_timer_get_time() + delay;
             break;
         }
         case WIFI_EVENT_AP_STACONNECTED:
@@ -147,6 +174,7 @@ static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *da
         snprintf(s_sta_ip, sizeof(s_sta_ip), IPSTR, IP2STR(&e->ip_info.ip));
         s_sta_connected = true;
         s_sta_connecting = false;
+        s_connect_failures = 0;
         s_last_connected_us = esp_timer_get_time();
         ESP_LOGI(TAG, "connected to '%s', IP %s", settings_get()->wifi_ssid, s_sta_ip);
         if (!s_sntp_started) {
@@ -177,10 +205,11 @@ static void mgr_task(void *arg)
             } else {
                 ESP_LOGW(TAG, "esp_wifi_connect: %s", esp_err_to_name(e));
             }
-            s_next_connect_us = now + RECONNECT_DELAY_S * 1000000LL;
+            s_next_connect_us = now + reconnect_delay_us();   // a failed attempt's disconnect event resets this
         }
         if (s_sta_connecting && now - s_connect_started_us > CONNECT_WATCHDOG_S * 1000000LL) {
             ESP_LOGW(TAG, "connect attempt timed out");
+            s_connect_failures++;
             s_sta_connecting = false;
             esp_wifi_disconnect();
         }
@@ -307,6 +336,7 @@ esp_err_t wifi_mgr_set_credentials(const char *ssid, const char *pass)
     s_sta_ip[0] = 0;
     s_last_connected_us = esp_timer_get_time();   // restart the AP fallback timer
     s_next_connect_us = 0;
+    s_connect_failures = 0;
     apply_sta_config();
     xSemaphoreGive(s_lock);
     ESP_LOGI(TAG, "credentials updated for '%s'", ssid);
@@ -368,6 +398,8 @@ esp_err_t wifi_mgr_scan(cJSON *out_array)
         ESP_LOGW(TAG, "scan failed: %s", esp_err_to_name(err));
     }
     s_scanning = false;
-    s_next_connect_us = 0;
+    // Resume connecting, but not instantly: a portal user who just scanned is about to
+    // pick a network, and an all-channel connect scan now would stall their connection.
+    s_next_connect_us = esp_timer_get_time() + reconnect_delay_us();
     return err;
 }
