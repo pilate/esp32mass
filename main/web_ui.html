@@ -231,13 +231,19 @@ async function startUpload(){
         const r=await fetch('/api/upload/chunk?offset='+off,{method:'PUT',headers:XRW,body:file.slice(off,end),cache:'no-store'});
         const j=await r.json().catch(()=>({}));
         if(r.status===409&&typeof j.received==='number'){off=j.received;continue}
-        if(!r.ok)throw new Error(j.error||('HTTP '+r.status));
+        if(!r.ok){
+          // A JSON error is the device's own verdict (no upload, SD write error, bad size): give up.
+          // Anything else (network failure, httpd's plain-text 408/5xx) is transport trouble: retry.
+          const err=new Error(j.error||('HTTP '+r.status));err.fatal=!!j.error;throw err;
+        }
         off=j.received;fails=0;
       }catch(e){
-        if(cancelReq||/no upload|SD card|larger|past/.test(e.message))throw e;
+        if(cancelReq||e.fatal)throw e;
         if(++fails>30)throw new Error('too many transfer errors: '+e.message);
         $('u-prog').textContent='connection lost, retrying ('+fails+')…';await sleep(2000);
-        try{const st=await api('/api/status');if(!st.upload.active)throw new Error('device dropped the upload: '+(st.upload.error||'unknown'));off=st.upload.received}catch(e2){if(/device dropped/.test(e2.message))throw e2}
+        let st=null;try{st=await api('/api/status')}catch(e2){}
+        if(st&&!st.upload.active)throw new Error('device dropped the upload: '+(st.upload.error||'unknown'));
+        if(st)off=st.upload.received;
         continue;
       }
       const el=(Date.now()-t0)/1000,rate=off/el;
