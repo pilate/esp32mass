@@ -171,7 +171,7 @@ async function download(full){
   if(S&&S.usb.attached){if(!confirm('The drive must be detached from the host during download. Detach now?'))return;try{await post('/api/usb',{action:'detach'})}catch(e){msg('m-usb',e.message,'bad');return}}
   location.href='/api/download'+(full?'?full=1':'');
 }
-async function wipe(){if(!confirm('Zero the first 2 MB of the card (partition table and boot sectors)?'))return;try{await post('/api/wipe');msg('m-usb','wiped','ok')}catch(e){msg('m-usb',e.message,'bad')}refresh()}
+async function wipe(){if(!confirm('Zero the first 2 MB and last 1 MB of the card (partition tables, including the backup GPT, and boot sectors)?'))return;try{await post('/api/wipe');msg('m-usb','wiped','ok')}catch(e){msg('m-usb',e.message,'bad')}refresh()}
 
 // ---- Wi-Fi
 async function scan(){$('nets').innerHTML='<small>scanning…</small>';try{const r=await api('/api/scan');const n=(r.networks||[]).sort((a,b)=>b.rssi-a.rssi);$('nets').innerHTML=n.length?n.map(x=>`<div class="net" data-ssid="${esc(x.ssid)}" onclick="pick(this.dataset.ssid)"><span>${x.secure?'&#128274; ':''}${esc(x.ssid)}</span><small>${x.rssi} dBm &middot; ch${x.chan}</small></div>`).join(''):'<small>no networks found</small>'}catch(e){$('nets').innerHTML='<small>'+esc(e.message)+'</small>'}}

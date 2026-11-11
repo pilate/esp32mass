@@ -390,6 +390,20 @@ static esp_err_t download_get(httpd_req_t *req)
     return err;
 }
 
+#define WIPE_HEAD_SECTORS 4096   // first 2 MB: MBR, primary GPT, boot sectors, first FAT copies
+#define WIPE_TAIL_SECTORS 2048   // last 1 MB: backup GPT header and entries (last 33 sectors)
+
+static esp_err_t zero_sectors(const uint8_t *zeros, size_t buf_sectors, uint32_t lba, uint32_t end)
+{
+    esp_err_t err = ESP_OK;
+    while (lba < end && err == ESP_OK) {
+        uint32_t n = end - lba < buf_sectors ? end - lba : buf_sectors;
+        err = sdcard_write(lba, zeros, n);
+        lba += n;
+    }
+    return err;
+}
+
 static esp_err_t wipe_post(httpd_req_t *req)
 {
     if (upload_active()) {
@@ -398,17 +412,26 @@ static esp_err_t wipe_post(httpd_req_t *req)
     if (!sdcard_try_mount()) {
         return web_send_error(req, "409 Conflict", "no SD card");
     }
-    bool was_attached = usb_msc_attached();
-    usb_msc_set_attached(false);
-    const size_t sectors = 64;
-    uint8_t *zeros = heap_caps_calloc(1, sectors * 512, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    // Allocate before detaching so running out of memory leaves the USB state alone.
+    const size_t buf_sectors = 64;
+    uint8_t *zeros = heap_caps_calloc(1, buf_sectors * 512, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
     if (!zeros) {
         return web_send_error(req, "500 Internal Server Error", "out of memory");
     }
-    esp_err_t err = ESP_OK;
-    // Zero the first 2 MB: MBR/GPT, boot sectors and the first FAT copies.
-    for (uint32_t lba = 0; lba < 4096 && err == ESP_OK; lba += sectors) {
-        err = sdcard_write(lba, zeros, sectors);
+    bool was_attached = usb_msc_attached();
+    usb_msc_set_attached(false);
+
+    // Zero both ends of the card. Clearing only the start leaves the backup GPT at
+    // the end, which partitioning tools then offer to "restore".
+    uint32_t total = sdcard_sector_count();
+    uint32_t head_end = total < WIPE_HEAD_SECTORS ? total : WIPE_HEAD_SECTORS;
+    uint32_t tail_start = total > WIPE_TAIL_SECTORS ? total - WIPE_TAIL_SECTORS : 0;
+    if (tail_start < head_end) {
+        tail_start = head_end;   // tiny card: the two ranges overlap
+    }
+    esp_err_t err = zero_sectors(zeros, buf_sectors, 0, head_end);
+    if (err == ESP_OK) {
+        err = zero_sectors(zeros, buf_sectors, tail_start, total);
     }
     heap_caps_free(zeros);
     image_meta_clear();
@@ -418,7 +441,7 @@ static esp_err_t wipe_post(httpd_req_t *req)
     if (err != ESP_OK) {
         return web_send_error(req, "500 Internal Server Error", "write failed");
     }
-    ESP_LOGW(TAG, "card header wiped");
+    ESP_LOGW(TAG, "card wiped (first 2 MB and last 1 MB)");
     cJSON *o = cJSON_CreateObject();
     cJSON_AddBoolToObject(o, "ok", true);
     return web_send_json(req, o);

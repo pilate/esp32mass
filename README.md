@@ -106,7 +106,7 @@ the log is available in the UI and at `GET /api/log`.
 | POST | `/api/upload/finish` | `{"sha256"?, "verify"?}` re-attaches USB |
 | POST | `/api/upload/abort` | |
 | GET | `/api/download` | the recorded image (`?full=1` for the whole card); USB must be detached |
-| POST | `/api/wipe` | zero the first 2 MB |
+| POST | `/api/wipe` | zero the first 2 MB and last 1 MB (partition tables incl. backup GPT) |
 | GET | `/api/log` | recent log text |
 | POST | `/api/ota` | raw app `.bin` |
 | POST | `/api/reboot` | |
