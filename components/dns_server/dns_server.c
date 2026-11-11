@@ -25,8 +25,10 @@
 #define QR_FLAG (1 << 7)
 #define QD_TYPE_A (0x0001)
 #define ANS_TTL_SEC (300)
+#define RECV_TIMEOUT_MS (250)
+#define STOP_TIMEOUT_MS (2000)
 
-static const char *TAG = "example_dns_redirect_server";
+static const char *TAG = "dns_server";
 
 // DNS Header Packet
 typedef struct __attribute__((__packed__))
@@ -58,7 +60,8 @@ typedef struct __attribute__((__packed__))
 
 // DNS server handle
 struct dns_server_handle {
-    bool started;
+    volatile bool started;
+    volatile bool stopped;      // set by the task right before it exits
     TaskHandle_t task;
     int num_of_entries;
     dns_entry_pair_t entry[];
@@ -183,87 +186,81 @@ static int parse_dns_request(char *req, size_t req_len, char *dns_reply, size_t 
     return reply_len;
 }
 
+static int open_dns_socket(void)
+{
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+    if (sock < 0) {
+        ESP_LOGE(TAG, "Unable to create socket: errno %d", errno);
+        return -1;
+    }
+    int one = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    // Wake up periodically so the task notices stop_dns_server() and closes its socket itself.
+    struct timeval tv = { .tv_sec = 0, .tv_usec = RECV_TIMEOUT_MS * 1000 };
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    struct sockaddr_in dest_addr = {
+        .sin_family = AF_INET,
+        .sin_port = htons(DNS_PORT),
+        .sin_addr.s_addr = htonl(INADDR_ANY),
+    };
+    if (bind(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr)) < 0) {
+        ESP_LOGE(TAG, "Socket unable to bind port %d: errno %d", DNS_PORT, errno);
+        close(sock);
+        return -1;
+    }
+    ESP_LOGI(TAG, "listening on port %d", DNS_PORT);
+    return sock;
+}
+
 /*
     Sets up a socket and listen for DNS queries,
     replies to all type A queries with the IP of the softAP
 */
-void dns_server_task(void *pvParameters)
+static void dns_server_task(void *pvParameters)
 {
     char rx_buffer[128];
-    char addr_str[128];
-    int addr_family;
-    int ip_protocol;
+    char reply[DNS_MAX_LEN];
     dns_server_handle_t handle = pvParameters;
 
     while (handle->started) {
-
-        struct sockaddr_in dest_addr;
-        dest_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-        dest_addr.sin_family = AF_INET;
-        dest_addr.sin_port = htons(DNS_PORT);
-        addr_family = AF_INET;
-        ip_protocol = IPPROTO_IP;
-        inet_ntoa_r(dest_addr.sin_addr, addr_str, sizeof(addr_str) - 1);
-
-        int sock = socket(addr_family, SOCK_DGRAM, ip_protocol);
+        int sock = open_dns_socket();
         if (sock < 0) {
-            ESP_LOGE(TAG, "Unable to create socket: errno %d", errno);
-            break;
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
         }
-        ESP_LOGI(TAG, "Socket created");
-
-        int err = bind(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
-        if (err < 0) {
-            ESP_LOGE(TAG, "Socket unable to bind: errno %d", errno);
-        }
-        ESP_LOGI(TAG, "Socket bound, port %d", DNS_PORT);
 
         while (handle->started) {
-            ESP_LOGI(TAG, "Waiting for data");
-            struct sockaddr_in6 source_addr; // Large enough for both IPv4 or IPv6
+            struct sockaddr_in source_addr;
             socklen_t socklen = sizeof(source_addr);
             int len = recvfrom(sock, rx_buffer, sizeof(rx_buffer) - 1, 0, (struct sockaddr *)&source_addr, &socklen);
-
-            // Error occurred during receiving
             if (len < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    continue;   // receive timeout: re-check handle->started
+                }
                 ESP_LOGE(TAG, "recvfrom failed: errno %d", errno);
-                close(sock);
                 break;
             }
-            // Data received
-            else {
-                // Get the sender's ip address as string
-                if (source_addr.sin6_family == PF_INET) {
-                    inet_ntoa_r(((struct sockaddr_in *)&source_addr)->sin_addr.s_addr, addr_str, sizeof(addr_str) - 1);
-                } else if (source_addr.sin6_family == PF_INET6) {
-                    inet6_ntoa_r(source_addr.sin6_addr, addr_str, sizeof(addr_str) - 1);
-                }
 
-                // Null-terminate whatever we received and treat like a string...
-                rx_buffer[len] = 0;
-
-                char reply[DNS_MAX_LEN];
-                int reply_len = parse_dns_request(rx_buffer, len, reply, DNS_MAX_LEN, handle);
-
-                ESP_LOGI(TAG, "Received %d bytes from %s | DNS reply with len: %d", len, addr_str, reply_len);
-                if (reply_len <= 0) {
-                    ESP_LOGE(TAG, "Failed to prepare a DNS reply");
-                } else {
-                    int err = sendto(sock, reply, reply_len, 0, (struct sockaddr *)&source_addr, sizeof(source_addr));
-                    if (err < 0) {
-                        ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
-                        break;
-                    }
-                }
+            // Null-terminate whatever we received and treat like a string...
+            rx_buffer[len] = 0;
+            int reply_len = parse_dns_request(rx_buffer, len, reply, sizeof(reply), handle);
+            ESP_LOGD(TAG, "Received %d bytes | DNS reply with len: %d", len, reply_len);
+            if (reply_len <= 0) {
+                ESP_LOGD(TAG, "Failed to prepare a DNS reply");
+                continue;
+            }
+            if (sendto(sock, reply, reply_len, 0, (struct sockaddr *)&source_addr, socklen) < 0) {
+                ESP_LOGW(TAG, "Error occurred during sending: errno %d", errno);
             }
         }
 
-        if (sock != -1) {
-            ESP_LOGE(TAG, "Shutting down socket");
-            shutdown(sock, 0);
-            close(sock);
-        }
+        shutdown(sock, 0);
+        close(sock);
     }
+
+    // Last access to the handle: stop_dns_server() frees it once it sees this.
+    handle->stopped = true;
     vTaskDelete(NULL);
 }
 
@@ -276,15 +273,28 @@ dns_server_handle_t start_dns_server(dns_server_config_t *config)
     handle->num_of_entries = config->num_of_entries;
     memcpy(handle->entry, config->item, config->num_of_entries * sizeof(dns_entry_pair_t));
 
-    xTaskCreate(dns_server_task, "dns_server", 4096, handle, 5, &handle->task);
+    if (xTaskCreate(dns_server_task, "dns_server", 4096, handle, 5, &handle->task) != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create dns server task");
+        free(handle);
+        return NULL;
+    }
     return handle;
 }
 
 void stop_dns_server(dns_server_handle_t handle)
 {
-    if (handle) {
-        handle->started = false;
-        vTaskDelete(handle->task);
-        free(handle);
+    if (!handle) {
+        return;
     }
+    // Let the task close its socket and exit on its own; deleting it while it is
+    // blocked in recvfrom() would leak the socket and keep port 53 bound.
+    handle->started = false;
+    for (int waited = 0; !handle->stopped && waited < STOP_TIMEOUT_MS; waited += 10) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    if (!handle->stopped) {
+        ESP_LOGE(TAG, "DNS server task did not stop; leaking its handle");
+        return;
+    }
+    free(handle);
 }
