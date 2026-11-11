@@ -10,12 +10,11 @@ static const char *TAG = "settings";
 static settings_t s_cfg;
 static image_meta_t s_img;
 
+// Missing or oversized keys leave dst untouched, so it keeps its default.
 static void load_str(nvs_handle_t h, const char *key, char *dst, size_t cap)
 {
     size_t len = cap;
-    if (nvs_get_str(h, key, dst, &len) != ESP_OK) {
-        // keep default already in dst
-    }
+    (void)nvs_get_str(h, key, dst, &len);
 }
 
 static void load_bool(nvs_handle_t h, const char *key, bool *dst)

@@ -265,13 +265,12 @@ int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset, uint8_t *
     return (int32_t)(n * SDCARD_SECTOR_SIZE);
 }
 
+// TinyUSB handles every command we support itself; anything that reaches here is unsupported.
 int32_t tud_msc_scsi_cb(uint8_t lun, uint8_t const scsi_cmd[16], void *buffer, uint16_t bufsize)
 {
+    (void)scsi_cmd;
     (void)buffer;
     (void)bufsize;
-    switch (scsi_cmd[0]) {
-    default:
-        tud_msc_set_sense(lun, SCSI_SENSE_ILLEGAL_REQUEST, 0x20, 0x00);   // invalid command
-        return -1;
-    }
+    tud_msc_set_sense(lun, SCSI_SENSE_ILLEGAL_REQUEST, 0x20, 0x00);   // invalid command
+    return -1;
 }

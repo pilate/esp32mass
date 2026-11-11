@@ -7,6 +7,7 @@
 #include "esp_netif.h"
 #include "esp_netif_sntp.h"
 #include "esp_log.h"
+#include "esp_check.h"
 #include "esp_mac.h"
 #include "esp_timer.h"
 #include "mdns.h"
@@ -205,18 +206,23 @@ static void mgr_task(void *arg)
 esp_err_t wifi_mgr_start(void)
 {
     s_lock = xSemaphoreCreateMutex();
+    if (!s_lock) {
+        return ESP_ERR_NO_MEM;
+    }
     s_boot_us = esp_timer_get_time();
     s_next_connect_us = 0;
 
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    ESP_RETURN_ON_ERROR(esp_netif_init(), TAG, "netif init");
+    ESP_RETURN_ON_ERROR(esp_event_loop_create_default(), TAG, "event loop");
     s_sta_netif = esp_netif_create_default_wifi_sta();
     s_ap_netif = esp_netif_create_default_wifi_ap();
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL, NULL));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL, NULL));
+    ESP_RETURN_ON_ERROR(esp_wifi_init(&cfg), TAG, "wifi init");
+    ESP_RETURN_ON_ERROR(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL, NULL),
+                        TAG, "register wifi events");
+    ESP_RETURN_ON_ERROR(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL, NULL),
+                        TAG, "register ip events");
 
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
@@ -226,12 +232,12 @@ esp_err_t wifi_mgr_start(void)
     esp_netif_set_hostname(s_sta_netif, host);
     esp_netif_set_hostname(s_ap_netif, host);
 
-    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_RETURN_ON_ERROR(esp_wifi_set_storage(WIFI_STORAGE_RAM), TAG, "set storage");
+    ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), TAG, "set mode");
     if (settings_has_wifi()) {
         apply_sta_config();
     }
-    ESP_ERROR_CHECK(esp_wifi_start());
+    ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "wifi start");
     esp_wifi_set_ps(WIFI_PS_NONE);
 
     esp_err_t err = mdns_init();
@@ -244,7 +250,9 @@ esp_err_t wifi_mgr_start(void)
         ESP_LOGW(TAG, "mDNS init failed: %s", esp_err_to_name(err));
     }
 
-    xTaskCreate(mgr_task, "wifi_mgr", 4096, NULL, 4, NULL);
+    if (xTaskCreate(mgr_task, "wifi_mgr", 4096, NULL, 4, NULL) != pdPASS) {
+        return ESP_ERR_NO_MEM;
+    }
     return ESP_OK;
 }
 
