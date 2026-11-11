@@ -488,7 +488,6 @@ static esp_err_t ota_post(httpd_req_t *req)
         return web_send_error(req, "500 Internal Server Error", "out of memory");
     }
     size_t remaining = req->content_len;
-    bool first = true;
     int timeouts = 0;
     while (remaining > 0) {
         int r = httpd_req_recv(req, buf, remaining < 4096 ? remaining : 4096);
@@ -499,14 +498,7 @@ static esp_err_t ota_post(httpd_req_t *req)
             err = ESP_FAIL;
             break;
         }
-        if (first) {
-            first = false;
-            if ((uint8_t)buf[0] != 0xE9) {
-                err = ESP_ERR_INVALID_ARG;
-                break;
-            }
-        }
-        err = esp_ota_write(h, buf, r);
+        err = esp_ota_write(h, buf, r);   // also rejects a first byte other than 0xE9
         if (err != ESP_OK) {
             break;
         }
@@ -516,7 +508,13 @@ static esp_err_t ota_post(httpd_req_t *req)
     free(buf);
     if (err != ESP_OK) {
         esp_ota_abort(h);
-        return web_send_error(req, "400 Bad Request", err == ESP_ERR_INVALID_ARG ? "not an ESP32 app image" : "upload interrupted");
+        if (err == ESP_ERR_OTA_VALIDATE_FAILED) {
+            return web_send_error(req, "400 Bad Request", "not an ESP32 app image");
+        }
+        if (err == ESP_FAIL) {
+            return web_send_error(req, "400 Bad Request", "upload interrupted");
+        }
+        return web_send_error(req, "500 Internal Server Error", esp_err_to_name(err));   // flash write
     }
     err = esp_ota_end(h);
     if (err != ESP_OK) {
