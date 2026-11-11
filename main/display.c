@@ -15,7 +15,11 @@ static const char *TAG = "display";
 static esp_lcd_panel_handle_t s_panel;
 static bool s_ok;
 static char s_shadow[DISPLAY_ROWS][DISPLAY_COLS + 1];
-static uint16_t s_rowbuf[BOARD_LCD_W * 8];
+// esp_lcd queues the pixel transfer and only waits for it at the start of the
+// next draw call, so a row buffer must not be touched while its DMA may still be
+// reading it. Alternating two buffers guarantees the one being refilled is idle.
+static uint16_t s_rowbuf[2][BOARD_LCD_W * 8];
+static int s_rowbuf_next;
 
 // RGB565 with bytes pre-swapped for the SPI panel (MSB first on the wire).
 #define RGB(r, g, b) ((uint16_t)__builtin_bswap16((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3)))
@@ -35,7 +39,7 @@ esp_err_t display_init(void)
         .miso_io_num = -1,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = sizeof(s_rowbuf),
+        .max_transfer_sz = sizeof(s_rowbuf[0]),
     };
     ESP_RETURN_ON_ERROR(spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_CH_AUTO), TAG, "spi bus");
 
@@ -66,13 +70,14 @@ esp_err_t display_init(void)
     esp_lcd_panel_set_gap(s_panel, BOARD_LCD_GAP_X, BOARD_LCD_GAP_Y);
     esp_lcd_panel_disp_on_off(s_panel, true);
 
-    // Clear
+    // Clear. Every row sends the same unchanging buffer, so reusing it is safe here.
     for (int i = 0; i < BOARD_LCD_W * 8; i++) {
-        s_rowbuf[i] = COL_BG;
+        s_rowbuf[0][i] = COL_BG;
     }
     for (int y = 0; y < BOARD_LCD_H; y += 8) {
-        esp_lcd_panel_draw_bitmap(s_panel, 0, y, BOARD_LCD_W, y + 8, s_rowbuf);
+        esp_lcd_panel_draw_bitmap(s_panel, 0, y, BOARD_LCD_W, y + 8, s_rowbuf[0]);
     }
+    s_rowbuf_next = 1;   // buffer 0 may still be in flight
     memset(s_shadow, 0, sizeof(s_shadow));
     gpio_set_level(BOARD_LCD_BL, 0);   // backlight on
     s_ok = true;
@@ -87,8 +92,10 @@ bool display_ok(void)
 
 static void draw_row(int row, const char *text, uint16_t fg)
 {
+    uint16_t *buf = s_rowbuf[s_rowbuf_next];
+    s_rowbuf_next ^= 1;
     for (int i = 0; i < BOARD_LCD_W * 8; i++) {
-        s_rowbuf[i] = COL_BG;
+        buf[i] = COL_BG;
     }
     size_t len = text ? strlen(text) : 0;
     if (len > DISPLAY_COLS) {
@@ -102,7 +109,7 @@ static void draw_row(int row, const char *text, uint16_t fg)
         const unsigned char *glyph = font8x8_basic[c];
         for (int y = 0; y < 8; y++) {
             unsigned char bits = glyph[y];
-            uint16_t *dst = &s_rowbuf[y * BOARD_LCD_W + ci * 8];
+            uint16_t *dst = &buf[y * BOARD_LCD_W + ci * 8];
             for (int x = 0; x < 8; x++) {
                 if (bits & (1 << x)) {
                     dst[x] = fg;
@@ -110,7 +117,7 @@ static void draw_row(int row, const char *text, uint16_t fg)
             }
         }
     }
-    esp_lcd_panel_draw_bitmap(s_panel, 0, row * 8, BOARD_LCD_W, row * 8 + 8, s_rowbuf);
+    esp_lcd_panel_draw_bitmap(s_panel, 0, row * 8, BOARD_LCD_W, row * 8 + 8, buf);
 }
 
 void display_lines(const char *const lines[DISPLAY_ROWS])
