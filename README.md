@@ -116,14 +116,35 @@ cannot add that header to a cross-site request without a CORS preflight, which
 the device never approves, so other websites cannot drive the API through your
 browser. Requests without it get `403`.
 
-Example with curl:
+Example with curl. Send the image in pieces: the ESP-IDF HTTP server stores
+a request's body length as a 32-bit value, so a single PUT of 4 GiB or more is
+silently truncated. Each piece below is read into memory by curl, so keep
+`CHUNK_MB` modest.
 
 ```sh
 H='X-Requested-With: curl'
-curl -H "$H" -X POST http://esp32mass.local/api/upload/begin -d '{"name":"disk.img","size":104857600}'
-curl -H "$H" -T disk.img "http://esp32mass.local/api/upload/chunk?offset=0"
-curl -H "$H" -X POST http://esp32mass.local/api/upload/finish -d '{}'
+URL=http://esp32mass.local
+IMG=disk.img
+CHUNK=$((64 * 1048576))
+START=0   # to resume an interrupted upload, set to upload.received from /api/status
+SIZE=$(stat -c %s "$IMG")
+
+[ "$START" -eq 0 ] && { curl -fsS -H "$H" -X POST "$URL/api/upload/begin" \
+     -d "{\"name\":\"$(basename "$IMG")\",\"size\":$SIZE}" || exit 1; }
+for ((off = START; off < SIZE; off += CHUNK)); do
+  dd if="$IMG" iflag=skip_bytes,count_bytes skip=$off count=$CHUNK bs=1M status=none |
+    curl -fsS -H "$H" -X PUT --data-binary @- "$URL/api/upload/chunk?offset=$off" || exit 1
+done
+curl -fsS -H "$H" -X POST "$URL/api/upload/finish" \
+     -d "{\"sha256\":\"$(sha256sum "$IMG" | cut -d' ' -f1)\"}"
 ```
+
+`--data-binary @-` (not `-T -`) matters: piping into `-T` uses chunked transfer
+encoding, which the device does not accept. If a piece fails, the device keeps
+what it has written so far (to a buffer boundary, not necessarily the start of
+the failed piece); `GET /api/status` reports it as `upload.received`, which is
+the `START` to resume from. The device drops an upload that sees no data for
+2 minutes.
 
 ## Layout on the card
 
